@@ -82,6 +82,7 @@ def isAndroid():
 RENDER_SCALES = ((100, '100%'), (75, '75%'), (50, '50%'))
 FILTERING = ((16, 'HIGH'), (8, 'MEDIUM'), (4, 'LOW'), (1, 'OFF'))
 ANTIALIASING = ((0, 'OFF'), (2, '2X'), (4, '4X'))
+THREADED_DRAWING = ((0, 'OFF'), (1, 'ON'))
 
 
 def mobileSetting(key, choices, settings=None):
@@ -393,16 +394,18 @@ class OfflineLauncher(DirectObject):
             button.reparentTo(panel)
 
     def showMobile(self):
-        panel = self.openPanel('PERFORMANCE', titleZ=0.45, closeZ=-0.43, closeScale=0.75)
+        panel = self.openPanel('PERFORMANCE', titleZ=0.5, closeZ=-0.475, closeScale=0.75)
         self.mobileButtons = {}
         # Each description sits on one line in the gap under its button.
         rows = (
-            ('render-scale', RENDER_SCALES, 'RENDER SCALE', 0.31,
+            ('render-scale', RENDER_SCALES, 'RENDER SCALE', 0.355,
              'Draws the world smaller. Lower is faster but softer.'),
-            ('filtering', FILTERING, 'TEXTURE FILTERING', 0.065,
+            ('filtering', FILTERING, 'TEXTURE FILTERING', 0.155,
              'Keeps far-off ground sharp. Lower is faster.'),
-            ('antialiasing', ANTIALIASING, 'ANTI-ALIASING', -0.18,
+            ('antialiasing', ANTIALIASING, 'ANTI-ALIASING', -0.045,
              'Smooths jagged edges. Costs speed, applies on next start.'),
+            ('threaded-drawing', THREADED_DRAWING, 'THREADED DRAWING', -0.245,
+             'Draws on another CPU core. May help on phones, applies on next start.'),
         )
         for key, choices, title, z, text in rows:
             button = self.redButton('', (0, 0, z), self.cycleMobile, textScale=0.05, imageScale=(2.9, 1, 1.25))
@@ -410,7 +413,7 @@ class OfflineLauncher(DirectObject):
             button.reparentTo(panel)
             self.mobileButtons[key] = button
             self.showMobileValue(key, choices, title)
-            DirectLabel(parent=panel, relief=None, pos=(0, 0, z - 0.125), text_font=self.interfaceFont,
+            DirectLabel(parent=panel, relief=None, pos=(0, 0, z - 0.105), text_font=self.interfaceFont,
                         text_scale=0.042, text_fg=TEXT_DARK, text_wordwrap=40, text=text)
 
     def showMobileValue(self, key, choices, title):

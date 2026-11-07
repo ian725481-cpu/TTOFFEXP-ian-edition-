@@ -39,6 +39,13 @@ class DisplayOptions:
         else:
             self.settings.updateSetting('game', 'antialiasing', antialias)
             loadPrcFileData('toonBase Settings Framebuffer MSAA', 'framebuffer-multisample 0')
+        # The launcher's PERFORMANCE panel: threaded drawing (Panda culls
+        # and draws a frame on other CPU cores while the game works out the
+        # next one). Off unless turned on; read before the window opens.
+        if self.settings.getInt('mobile', 'threaded-drawing', 0) == 1:
+            from panda3d.core import GraphicsEngine, GraphicsThreadingModel
+            loadPrcFileData('toonBase Settings Threading', 'threading-model Cull/Draw')
+            GraphicsEngine.getGlobalPtr().setThreadingModel(GraphicsThreadingModel('Cull/Draw'))
         self.notify.debug('before prc settings embedded mode=%s' % str(embed))
         self.notify.debug('before prc settings full screen mode=%s' % str(mode))
         loadPrcFileData('toonBase Settings Window Res', 'win-size %s %s' % (res[0], res[1]))
