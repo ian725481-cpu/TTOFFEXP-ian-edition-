@@ -42,6 +42,15 @@ class ToonBase(OTPBase.OTPBase):
         # shadow lags its toon by one frame at most.
         self.shadowTrav = CrowdShadowTraverser('base.shadowTrav')
         self.shadowTrav.setRespectPrevTransform(False)
+        # Panda's graphics state cleanup (its cache of transform and render
+        # states) ran every frame: 0.8 to 1.5 ms of each frame in a
+        # playground on a PC, 3 ms in Cashbot HQ, and several times that on
+        # a phone, most of it the same however little there is to clean.
+        # Every 4th frame halves it; with garbage-collect-states-rate 0.25
+        # the whole cache is still gone through every 16 frames.
+        if self.taskMgr.hasTaskNamed('garbageCollectStates'):
+            self.taskMgr.remove('garbageCollectStates')
+            self.taskMgr.add(self.__collectStates, 'garbageCollectStates', sort=46)
         base.enableMusic(self.display.settings.getBool('game', 'music', True))
         base.enableSoundEffects(self.display.settings.getBool('game', 'sfx', True))
         self.disableShowbaseMouse()
@@ -265,6 +274,14 @@ class ToonBase(OTPBase.OTPBase):
         cbm.addBin('ground', CullBinManager.BTUnsorted, 18)
         cbm.addBin('shadow', CullBinManager.BTBackToFront, 19)
         cbm.addBin('gui-popup', CullBinManager.BTFixed, 60)
+
+    STATE_CLEANUP_EVERY = 4
+
+    def __collectStates(self, task):
+        if globalClock.getFrameCount() % self.STATE_CLEANUP_EVERY == 0:
+            TransformState.garbageCollect()
+            RenderState.garbageCollect()
+        return task.cont
 
     def disableShowbaseMouse(self):
         self.useDrive()

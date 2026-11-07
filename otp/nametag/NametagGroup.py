@@ -280,7 +280,22 @@ class NametagGroup:
         return False
 
 
+    # Name tags are brought up to date every other frame, half of them on
+    # one frame and half on the next: with a crowd of NPC toons, ticking
+    # every tag every frame was close to a millisecond of each frame on a
+    # PC, several on a phone. A tag's size and its margin arrow lag by one
+    # frame at most; a new tag (or one that starts ticking again) is done
+    # on its first frame.
+    TICK_EVERY = 2
+    _tickPhases = 0
+
     def __tickTask(self, task):
+        phase = getattr(self, '_tickPhase', None)
+        if phase is None:
+            phase = self._tickPhase = NametagGroup._tickPhases
+            NametagGroup._tickPhases += 1
+        if task.frame and (globalClock.getFrameCount() + phase) % self.TICK_EVERY:
+            return task.cont
         for nametag in self.nametags:
             nametag.tick()
             if (NametagGlobals.masterNametagsActive and self.active) or self.hasButton():
