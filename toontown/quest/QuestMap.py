@@ -209,6 +209,10 @@ class QuestMap(DirectFrame):
                     self.zoneId = zoneId
                     self.updateQuestInfo()
                     self.updateCogInfo()
+                    # The map is brought up to date on every quest change;
+                    # one update task is enough (each call added another,
+                    # and they all ran every frame).
+                    taskMgr.remove('questMapUpdate')
                     taskMgr.add(self.update, 'questMapUpdate')
                 else:
                     self.stop()
