@@ -201,6 +201,22 @@ class DNASuitGraph(object):
     def getConnectingEdge(self, pointA, pointB):
         assert isinstance(pointA, DNAStoreSuitPoint.DNAStoreSuitPoint)
         assert isinstance(pointB, DNAStoreSuitPoint.DNAStoreSuitPoint)
+        # The cogs ask this every time they start a leg, and going through
+        # every edge of the street took a quarter of the server's time on a
+        # street. The first edge joining the two points either way, as the
+        # search through the list found, from a table made once.
+        table = getattr(self, '_connectingEdges', None)
+        if table is None or self._connectingEdgesCount != len(self.edges):
+            table = {}
+            for edge in self.edges:
+                table.setdefault((edge.a, edge.b), edge)
+                table.setdefault((edge.b, edge.a), edge)
+            self._connectingEdges = table
+            self._connectingEdgesCount = len(self.edges)
+        edge = table.get((pointA.id, pointB.id))
+        if edge is not None and self._pointId2point.get(pointA.id) is pointA and \
+                self._pointId2point.get(pointB.id) is pointB:
+            return edge
         for edge in self.edges:
             a = self.getPointFromIndex(edge.a)
             b = self.getPointFromIndex(edge.b)
