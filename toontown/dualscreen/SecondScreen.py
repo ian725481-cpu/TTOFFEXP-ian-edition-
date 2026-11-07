@@ -191,11 +191,17 @@ class SecondScreen(DirectObject):
     def handOver(self):
         if not isAndroid() or not self.texture.hasRamImage():
             return
-        picture = self.texture.getRamImageAs('RGBA').getData()
-        key = hash(picture)
-        if key == self.lastPicture:
+        # Most of the time the page has not changed since the last picture.
+        # That is found by comparing the picture as Panda keeps it with the
+        # last one, byte for byte (a fast memory compare), before turning it
+        # into the RGBA order Android wants: hashing the 2.4 MB picture and
+        # converting it 12 to 30 times a second was a few ms of the game's
+        # frame each time on a phone.
+        raw = self.texture.getRamImage().getData()
+        if raw == self.lastPicture:
             return
-        self.lastPicture = key
+        self.lastPicture = raw
+        picture = self.texture.getRamImageAs('RGBA').getData()
         try:
             import android_support
             android_support.second_screen_frame(picture, self.size[0], self.size[1])
