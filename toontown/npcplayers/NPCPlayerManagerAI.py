@@ -13,7 +13,7 @@ import random
 
 from direct.directnotify import DirectNotifyGlobal
 from direct.task import Task
-from panda3d.core import Point3, Vec3
+from panda3d.core import BoundingBox, Point3, Vec3
 
 from otp.local.ExecutionContext import getClientBuiltin
 from toontown.battle.DistributedBattleBaseAI import DistributedBattleBaseAI
@@ -553,27 +553,39 @@ class NPCPlayerManagerAI:
         if spot is not None:
             self.spawn(area, spot[0], spot[1], player, inRoad)
 
+    # The floor spots found for each lobby, kept for the whole game: the
+    # lobby is the same every visit, and its area is dropped after a few
+    # other places.
+    _sampledFloors = {}
+
     def sampleFloor(self, area, scene):
         """Spots to stand on for a place with none known (a boss lobby): its
         main floor, every FLOOR_SAMPLE feet, not the stairs or what's under
         them."""
-        nav = getNav()
         bounds = scene.getTightBounds()
         if not bounds:
             return
-        low, high = bounds
+        # (The same place: the same zone, model and size.)
+        key = (area.areaId, scene.getName(), tuple(round(v, 1) for v in tuple(bounds[0]) + tuple(bounds[1])))
+        kept = NPCPlayerManagerAI._sampledFloors.get(key)
+        if kept is not None:
+            anchors, lobbyFloor = kept
+            area.anchors = [(Point3(p), area.areaId) for p in anchors]
+            area.lobbyFloor = set(lobbyFloor)
+            return
+        nav = getNav()
         found = []
         # On a grid of whole FLOOR_SAMPLE steps, so onLobbyFloor can find a
-        # point's square by rounding.
-        x = math.floor(low[0] / FLOOR_SAMPLE) * FLOOR_SAMPLE
-        while x <= high[0]:
-            y = math.floor(low[1] / FLOOR_SAMPLE) * FLOOR_SAMPLE
-            while y <= high[1]:
-                ground = nav.standZ(x, y, 1.0)
-                if ground is not None:
-                    found.append(Point3(x, y, ground))
-                y += FLOOR_SAMPLE
-            x += FLOOR_SAMPLE
+        # point's square by rounding. Only the squares over a floor's
+        # collisions can have ground (the rays only hit those): laid over
+        # the whole model, the C.E.O. lobby's skybox made it 218,000 rays,
+        # several seconds of the lobby's loading freeze.
+        for i, j in sorted(self.floorSquares(scene, bounds)):
+            x = i * FLOOR_SAMPLE
+            y = j * FLOOR_SAMPLE
+            ground = nav.standZ(x, y, 1.0)
+            if ground is not None:
+                found.append(Point3(x, y, ground))
         if not found:
             return
         floor = sorted(p[2] for p in found)[len(found) // 2]
@@ -582,7 +594,43 @@ class NPCPlayerManagerAI:
         # The open floor, by grid square, for checking walks (onLobbyFloor).
         area.lobbyFloor = set((int(round(p[0] / FLOOR_SAMPLE)), int(round(p[1] / FLOOR_SAMPLE)))
                               for p, zoneId in area.anchors)
+        NPCPlayerManagerAI._sampledFloors[key] = ([Point3(p) for p, zoneId in area.anchors], frozenset(area.lobbyFloor))
         self.notify.info('area %d: %d floor spots sampled' % (area.areaId, len(area.anchors)))
+
+    @staticmethod
+    def floorSquares(scene, bounds):
+        """The grid squares (i, j: the point i * FLOOR_SAMPLE, j *
+        FLOOR_SAMPLE) inside the model's bounds and over one of its floor
+        collisions."""
+        low, high = bounds
+        # The squares the whole-model grid had (from the step at or below
+        # its low corner), and of those the ones a floor's bounds cover.
+        firstI, lastI = int(math.floor(low[0] / FLOOR_SAMPLE)), int(math.floor(high[0] / FLOOR_SAMPLE))
+        firstJ, lastJ = int(math.floor(low[1] / FLOOR_SAMPLE)), int(math.floor(high[1] / FLOOR_SAMPLE))
+        squares = set()
+        for path in scene.findAllMatches('**/+CollisionNode'):
+            node = path.node()
+            if (node.getIntoCollideMask() & ToontownGlobals.FloorBitmask).isZero():
+                continue
+            mat = path.getMat(scene)
+            for k in range(node.getNumSolids()):
+                volume = node.getSolid(k).getBounds().makeCopy()
+                box = BoundingBox()
+                if not volume.isInfinite():
+                    volume.xform(mat)
+                    box.extendBy(volume)
+                if volume.isInfinite() or box.isEmpty() or box.isInfinite():
+                    # (A collision plane: all of them.)
+                    rangeI, rangeJ = (firstI, lastI), (firstJ, lastJ)
+                else:
+                    rangeI = (max(firstI, int(math.ceil(box.getMin()[0] / FLOOR_SAMPLE))),
+                              min(lastI, int(math.floor(box.getMax()[0] / FLOOR_SAMPLE))))
+                    rangeJ = (max(firstJ, int(math.ceil(box.getMin()[1] / FLOOR_SAMPLE))),
+                              min(lastJ, int(math.floor(box.getMax()[1] / FLOOR_SAMPLE))))
+                for i in range(rangeI[0], rangeI[1] + 1):
+                    for j in range(rangeJ[0], rangeJ[1] + 1):
+                        squares.add((i, j))
+        return squares
 
     def onLobbyFloor(self, area, path):
         """Whether every step of a path is on the lobby's open floor: near a
