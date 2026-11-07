@@ -95,6 +95,13 @@ garbage-collect-states-rate 0.25
 # street map, cog and toon the game let go of stayed in memory for good
 # (about 5 MB more per area visited). Collected garbage is freed again.
 gc-save-all #f
+# Panda's repositories (the client, the UberDOG and the district: three of
+# them, sharing one Python) each did three full garbage collections 5, 10,
+# 20, 40... minutes in, back to back (a pause of a tenth of a second to a
+# second on a PC), and doubled the collector's threshold each time until
+# the small collections stopped. The collector now keeps its normal pace;
+# the full collection happens behind the loading screen (ToontownLoader).
+garbage-threshold-adjust-delay 1e12
 # Every animation blends between its frames (Avatars did already; props,
 # characters and other Actors played frame by frame).
 interpolate-frames 1

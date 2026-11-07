@@ -1,3 +1,4 @@
+import gc
 import sys
 import builtins
 from panda3d.core import *
@@ -50,6 +51,13 @@ class ToontownLoader(Loader.Loader):
             Loader.Loader.notify.warning("Tried to end a block ('%s'), other then the current one ('%s')" % (name, self.blockName))
             return None
         self.inBulkBlock = None
+        # A full garbage collection now, behind the loading screen, instead
+        # of during play: the one Python collects the client and the built-in
+        # server, and a full pass over the place just left took a tenth of a
+        # second on a PC (several times that on a phone) whenever it came.
+        # After this one the collector has little reason to do a full pass
+        # until the next place.
+        gc.collect()
         expectedCount, loadedCount = self.loadingScreen.end()
         now = globalClock.getRealTime()
         Loader.Loader.notify.info("At end of block '%s', expected %s, loaded %s, duration=%s" % (self.blockName,
