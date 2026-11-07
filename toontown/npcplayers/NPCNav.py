@@ -98,6 +98,18 @@ class NPCNav:
         base = getClientBuiltin('base')
         if base is None or not hasattr(base, 'cr'):
             return []
+        # Once a frame: the client's objects don't change between the rays
+        # of one server step, and each NPC walk asks for dozens of rays
+        # (looking through the client's objects each time added up).
+        frame = globalClock.getFrameCount()
+        cached = getattr(self, '_hiddenRoomsFrame', None)
+        if cached is not None and cached[0] == frame and cached[1] is base.cr:
+            return list(cached[2])
+        roots = self._findHiddenRooms(base)
+        self._hiddenRoomsFrame = (frame, base.cr, roots)
+        return list(roots)
+
+    def _findHiddenRooms(self, base):
         roots = []
         live = set()
         for obj in list(base.cr.doId2do.values()):

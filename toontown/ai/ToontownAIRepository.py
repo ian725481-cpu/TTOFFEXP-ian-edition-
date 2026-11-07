@@ -68,9 +68,13 @@ import otp.ai.DiagnosticMagicWords
 if config.ConfigVariableBool('want-toonfest', False).getValue():
     from toontown.hood import TFHoodAI
 
+from toontown.ai.TypedDoTable import TypedDoTable, objectsOfType
+
 class ToontownAIRepository(ToontownInternalRepository):
     def __init__(self, baseChannel, serverId, districtName):
         ToontownInternalRepository.__init__(self, baseChannel, serverId, dcSuffix='AI')
+        # Its objects kept by class too, for objectsOfType (see TypedDoTable).
+        self.doId2do = TypedDoTable(self.doId2do)
 
         self.notify.setInfo(True)
 
@@ -151,13 +155,15 @@ class ToontownAIRepository(ToontownInternalRepository):
         from toontown.toon.DistributedToonAI import DistributedToonAI
         from toontown.toon.DistributedNPCToonBaseAI import DistributedNPCToonBaseAI
         count = 0
-        for do in list(self.doId2do.values()):
-            if not isinstance(do, DistributedToonAI) or isinstance(do, DistributedNPCToonBaseAI):
-                continue
+        for do in self.objectsOfType(DistributedToonAI, DistributedNPCToonBaseAI):
             if do.isPlayerControlled() or getattr(do, 'isNPCPlayer', lambda: False)():
                 if not getattr(do, 'isDisabled', lambda: False)():
                     count += 1
         return count
+
+    def objectsOfType(self, classes, exclude=None):
+        """Every object of a kind in the district (see TypedDoTable)."""
+        return objectsOfType(self, classes, exclude)
 
     def updatePopulation(self, task=None):
         if not getattr(self, 'districtStats', None):

@@ -36,7 +36,9 @@ from toontown.npcplayers.NPCBossCrew import NPCBossCrew
 from toontown.suit.DistributedBossCogAI import DistributedBossCogAI
 from toontown.npcplayers.NPCPlayerAI import NPCPlayerAI
 from toontown.toon.DistributedToonAI import DistributedToonAI
+from toontown.toon.DistributedNPCToonBaseAI import DistributedNPCToonBaseAI
 from toontown.toonbase import TTLocalizer, ToontownGlobals
+from toontown.ai.TypedDoTable import objectsOfType
 
 SPAWNS_PER_TICK = 3
 # Building a toon's model takes the player's game a moment, so the toons of
@@ -308,8 +310,7 @@ class NPCPlayerManagerAI:
         # The NPCs' maps take the lifts from the district (see GhostLift).
         from toontown.npcplayers import NPCPathfinder
         from toontown.coghq.DistributedLiftAI import DistributedLiftAI
-        NPCPathfinder.aiLiftSource = lambda: [obj for obj in list(air.doId2do.values())
-                                              if isinstance(obj, DistributedLiftAI)]
+        NPCPathfinder.aiLiftSource = lambda: objectsOfType(air, DistributedLiftAI)
         self.areas = {}
         self.npcsPerArea = npcsPerArea()
         self.keepAreas = keepAreas()
@@ -343,9 +344,12 @@ class NPCPlayerManagerAI:
     # --- Who and where the players are ---
 
     def getPlayers(self):
+        # (From the district's toons only, shopkeepers and the other
+        # townsfolk left out: going through all of its 4,000 or so objects
+        # for them was a quarter of the once-a-second update.)
         players = []
-        for obj in list(self.air.doId2do.values()):
-            if isinstance(obj, DistributedToonAI) and not isNPC(obj) and obj.isPlayerControlled():
+        for obj in objectsOfType(self.air, DistributedToonAI, DistributedNPCToonBaseAI):
+            if not isNPC(obj) and obj.isPlayerControlled():
                 players.append(obj)
         return players
 
@@ -403,11 +407,18 @@ class NPCPlayerManagerAI:
                         self.despawn(npc, quietly=True)
                 if not area.npcs:
                     del self.areas[areaId]
-        zoneIndex = {}
-        for obj in list(self.air.doId2do.values()):
-            zoneIndex.setdefault(getattr(obj, 'zoneId', None), []).append(obj)
         self.refill()
         self.party.fillSeats()
+        # The objects in the zones the player's NPC party is in, for their
+        # handshakes. (Gathered for every zone of the game each second, it
+        # was a third of this update; out in town there is often no party.)
+        zones = set(npc.zoneId for npc in self.party.members if not npc.isDeleted())
+        zoneIndex = {}
+        if zones:
+            for obj in list(self.air.doId2do.values()):
+                zoneId = getattr(obj, 'zoneId', None)
+                if zoneId in zones:
+                    zoneIndex.setdefault(zoneId, []).append(obj)
         self.party.answerHandshakes(zoneIndex)
         self.joinBattles()
         self.joinBosses()
@@ -1770,8 +1781,8 @@ class NPCPlayerManagerAI:
     HELPERS = 3
 
     def playerBoss(self, player):
-        for obj in list(self.air.doId2do.values()):
-            if isinstance(obj, DistributedBossCogAI) and not obj.isDeleted() and obj.zoneId == player.zoneId and \
+        for obj in objectsOfType(self.air, DistributedBossCogAI):
+            if not obj.isDeleted() and obj.zoneId == player.zoneId and \
                     player.doId in obj.involvedToons + obj.looseToons:
                 return obj
         return None
@@ -1784,8 +1795,8 @@ class NPCPlayerManagerAI:
             # Building and HQ battles add their toons before they are
             # generated, so the toon's battleId stays unset.
             battle = None
-            for obj in list(self.air.doId2do.values()):
-                if isinstance(obj, DistributedBattleBaseAI) and not obj.isDeleted() and player.doId in obj.toons:
+            for obj in objectsOfType(self.air, DistributedBattleBaseAI):
+                if not obj.isDeleted() and player.doId in obj.toons:
                     battle = obj
                     break
         if battle is None or battle.isDeleted() or battle.fsm is None:
@@ -1936,8 +1947,8 @@ class NPCPlayerManagerAI:
         npc.helper = True
 
     def joinBosses(self):
-        for obj in list(self.air.doId2do.values()):
-            if isinstance(obj, DistributedBossCogAI) and obj.doId not in self.bossCrews and \
+        for obj in objectsOfType(self.air, DistributedBossCogAI):
+            if obj.doId not in self.bossCrews and \
                     [npc for npc in self.party.members if npc.doId in obj.involvedToons + obj.looseToons]:
                 self.bossCrews[obj.doId] = NPCBossCrew(self, obj)
 

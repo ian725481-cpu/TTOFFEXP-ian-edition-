@@ -34,6 +34,7 @@ from toontown.safezone.DistributedGolfKartAI import DistributedGolfKartAI
 from toontown.racing.DistributedRaceAI import DistributedRaceAI
 from toontown.safezone.DistributedTrolleyAI import DistributedTrolleyAI
 from toontown.toonbase import ToontownGlobals
+from toontown.ai.TypedDoTable import TypedDoTable, objectsOfType
 
 TELEPORT_TIME = 2.6
 RUN_SPEED = ToontownGlobals.ToonForwardSpeed
@@ -171,6 +172,11 @@ class NPCParty:
         # showed up in profiles (a few ms per tick in a field office), so the
         # typed lists are cached.
         # Rebuilt when an object comes or goes, or after half a second.
+        # The district keeps its objects by class (TypedDoTable): asking it
+        # costs next to nothing and is never out of date.
+        table = self.air.doId2do
+        if isinstance(table, TypedDoTable):
+            return table.ofType(classes)
         key = (len(self.air.doId2do), int(globalClock.getFrameTime() * 2))
         cache = getattr(self, '_typedCache', None)
         if cache is None or cache[0] != key:
@@ -362,8 +368,8 @@ class NPCParty:
         # (Its rooms, its battles: zones of their own, all in one scene.)
         from otp.level.DistributedLevelAI import DistributedLevelAI
         inLevel = False
-        for obj in list(self.air.doId2do.values()):
-            if isinstance(obj, DistributedLevelAI) and player.doId in getattr(obj, 'avIdList', ()) \
+        for obj in objectsOfType(self.air, DistributedLevelAI):
+            if player.doId in getattr(obj, 'avIdList', ()) \
                     and npc.doId in getattr(obj, 'avIdList', ()):
                 inLevel = True
                 break
