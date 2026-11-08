@@ -11,18 +11,31 @@ from toontown.toonbase import ToontownGlobals
 from toontown.toonbase import TTLocalizer
 from otp.otpbase import OTPGlobals
 from toontown.cogdominium import CogdoCraneGameConsts as GameConsts
+import math
+import os
 import random
+
+PILOT_DEBUG = bool(os.environ.get('CRANE_PILOT_DEBUG'))
+from panda3d.physics import ActorNode, PhysicsCollisionHandler
+from otp.nametag import NametagGlobals
+from panda3d.direct import SmoothMover
+from toontown.toonbase import TouchControls
 
 class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
     notify = DirectNotifyGlobal.directNotify.newCategory('DistCogdoCrane')
     firstMagnetBit = 21
     craneMinY = 8
     craneMaxY = 25
-    armMinH = -45
-    armMaxH = 45
-    shadowOffset = 7
+    armMinH = -GameConsts.CraneMaxH
+    armMaxH = GameConsts.CraneMaxH
+    # How much of the arm's swing the crane camera turns with.
+    cameraFollow = 0.75
+    # The room's floor is at z 0, as the CFO's is: 7 (the old cogdo
+    # value) left the shadows floating 7 units over the floor.
+    shadowOffset = 1
     emptySlideSpeed = 10
-    emptyRotateSpeed = 20
+    # The arm swings a long way here, so it turns faster than a CFO crane.
+    emptyRotateSpeed = 26
     lookAtPoint = Point3(0.3, 0, 0.1)
     lookAtUp = Vec3(0, -1, 0)
     neutralStickHinge = VBase3(0, 90, 0)
@@ -44,6 +57,11 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.links = []
         self.activeLinks = []
         self.collisions = NodePathCollection()
+        # One client runs every crane's cable here (the NPC toons' too). A
+        # link's shell is an inverted sphere, which every link of another
+        # crane is outside of, so each crane's cable collides in a
+        # traversal of its own (see DistCogdoCraneGame._doPhysics).
+        self.linkTrav = CollisionTraverser('craneLinks')
         self.physicsActivated = 0
         self.snifferActivated = 0
         self.magnetOn = 0
@@ -53,6 +71,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.controls = self.root.attachNewNode('controls')
         self.controls.setPos(0, -4.9, 0)
         self.arm = self.hinge.attachNewNode('arm')
+        self.camPivot = self.hinge.attachNewNode('camPivot')
         self.crane = self.arm.attachNewNode('crane')
         self.cable = self.hinge.attachNewNode('cable')
         self.topLink = self.crane.attachNewNode('topLink')
@@ -70,6 +89,8 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.heldObject = None
         self.craneAdviceLabel = None
         self.magnetAdviceLabel = None
+        self.closeButton = None
+        self.pilot = None
         self.atLimitSfx = base.loader.loadSfx('phase_4/audio/sfx/MG_cannon_adjust.ogg')
         self.magnetOnSfx = base.loader.loadSfx('phase_10/audio/sfx/CBHQ_CFO_magnet_on.ogg')
         self.magnetLoopSfx = base.loader.loadSfx('phase_10/audio/sfx/CBHQ_CFO_magnet_loop.ogg')
@@ -123,7 +144,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         cn.addSolid(cs)
         cn.setIntoCollideMask(ToontownGlobals.PieBitmask)
         self.controls.attachNewNode(cn)
-        arm = self.craneGame.craneArm.copyTo(self.crane)
+        self.armModel = self.craneGame.craneArm.copyTo(self.crane)
         self.craneGame.cranes[self.index] = self
 
     def disable(self):
@@ -217,7 +238,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         if not self.physicsActivated:
             for an, anp, cnp in self.activeLinks:
                 self.craneGame.physicsMgr.attachPhysicalNode(an)
-                base.cTrav.addCollider(cnp, self.handler)
+                self.linkTrav.addCollider(cnp, self.handler)
 
             self.collisions.unstash()
             self.physicsActivated = 1
@@ -226,7 +247,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         if self.physicsActivated:
             for an, anp, cnp in self.activeLinks:
                 self.craneGame.physicsMgr.removePhysicalNode(an)
-                base.cTrav.removeCollider(cnp)
+                self.linkTrav.removeCollider(cnp)
 
             self.collisions.stash()
             self.physicsActivated = 0
@@ -389,7 +410,14 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
 
     def __enableControlInterface(self):
         gui = loader.loadModel('phase_3.5/models/gui/avatar_panel_gui')
+        self.closeButton = DirectButton(image=(gui.find('**/CloseBtn_UP'),
+         gui.find('**/CloseBtn_DN'),
+         gui.find('**/CloseBtn_Rllvr'),
+         gui.find('**/CloseBtn_UP')), relief=None, scale=2, text=TTLocalizer.CashbotCraneLeave, text_scale=0.04, text_pos=(0, -0.07), text_fg=VBase4(1, 1, 1, 1), pos=(1.05, 0, -0.82), command=self.__exitCrane)
+        gui.removeNode()
+        self.accept('escape', self.__exitCrane)
         self.accept('control', self.__controlPressed)
+        TouchControls.request('crane')
         self.accept('control-up', self.__controlReleased)
         self.accept('InputState-forward', self.__upArrow)
         self.accept('InputState-reverse', self.__downArrow)
@@ -404,10 +432,14 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
 
     def __disableControlInterface(self):
         self.__turnOffMagnet()
+        if self.closeButton:
+            self.closeButton.destroy()
+            self.closeButton = None
         self.__cleanupCraneAdvice()
         self.__cleanupMagnetAdvice()
         self.ignore('escape')
         self.ignore('control')
+        TouchControls.release('crane')
         self.ignore('control-up')
         self.ignore('InputState-forward')
         self.ignore('InputState-reverse')
@@ -450,6 +482,14 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         else:
             self.__setMoveSound(None)
         return Task.cont
+
+    def __exitCrane(self):
+        if self.closeButton:
+            self.closeButton.destroy()
+            self.closeButton = DirectLabel(relief=None, text=TTLocalizer.CashbotCraneLeaving, pos=(1.05, 0, -0.88), text_pos=(0, 0), text_scale=0.06, text_fg=VBase4(1, 1, 1, 1))
+        self.__cleanupCraneAdvice()
+        self.__cleanupMagnetAdvice()
+        self.d_requestFree()
 
     def __incrementChangeSeq(self):
         self.changeSeq = self.changeSeq + 1 & 255
@@ -511,6 +551,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         h = self.arm.getH() - xd * self.rotateSpeed * dt
         limitH = max(min(h, self.armMaxH), self.armMinH)
         self.arm.setH(limitH)
+        self.camPivot.setH(limitH * self.cameraFollow)
         y = self.crane.getY() + yd * self.slideSpeed * dt
         limitY = max(min(y, self.craneMaxY), self.craneMinY)
         atLimit = (limitH != h or limitY != y)
@@ -593,9 +634,14 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         np = entry.getIntoNodePath()
         doId = int(np.getNetTag('object'))
         obj = base.cr.doId2do.get(doId)
+        # Never a bag another crane holds: offline every crane runs on this
+        # client, and an NPC's magnet brushing a player's bag took it
+        # (the AI said no, and the bag fell).
+        if obj and obj.state in ('Grabbed', 'LocalGrabbed'):
+            return
         if obj and obj.state != 'LocalDropped' and (obj.state != 'Dropped' or obj.craneId != self.doId):
-            obj.d_requestGrab()
-            obj.demand('LocalGrabbed', localAvatar.doId, self.doId)
+            obj.d_requestGrab(self.avId)
+            obj.demand('LocalGrabbed', self.avId, self.doId)
 
     def grabObject(self, obj):
         if self.state == 'Off':
@@ -612,7 +658,7 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.handler.setDynamicFrictionCoef(obj.craneFrictionCoef)
         self.slideSpeed = obj.craneSlideSpeed
         self.rotateSpeed = obj.craneRotateSpeed
-        if self.avId == localAvatar.doId and not self.magnetOn:
+        if self.craneGame.runsHere(self.avId) and not self.magnetOn:
             self.releaseObject()
         return
 
@@ -637,10 +683,183 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
             obj = self.heldObject
             obj.d_requestDrop()
             if obj.state == 'Grabbed':
-                obj.demand('LocalDropped', localAvatar.doId, self.doId)
+                obj.demand('LocalDropped', self.avId, self.doId)
 
     def __hitTrigger(self, event):
-        pass
+        place = base.cr.playGame.getPlace()
+        if place and place.fsm.getCurrentState().getName() == 'walk':
+            self.d_requestControl()
+
+    # --- An NPC toon at the controls ---
+    #
+    # Offline the NPC toons have no client of their own, so the player's
+    # client works their cranes: swing over a money bag and grab it, wait
+    # for a cog to come down the lane, lead it and drop the bag on it. Like
+    # a toon at the stick it is not perfect: it aims a little off and takes
+    # a moment to react.
+
+    def __startPilot(self):
+        self.__stopPilot()
+        self.pilot = {'mode': 'fetch', 'target': None, 'until': globalClock.getFrameTime() + random.uniform(0.6, 1.4),
+                      'error': (0, 0), 'cog': None, 'ambush': {}}
+        taskMgr.add(self.__pilotTask, self.uniqueName('pilot'))
+
+    def __stopPilot(self):
+        taskMgr.remove(self.uniqueName('pilot'))
+        self.pilot = None
+        if hasattr(self, 'arrowHorz'):
+            self.arrowHorz = self.arrowVert = 0
+        self.__setMoveSound(None)
+
+    def __pilotSteer(self, x, y):
+        # Swings toward (x, y); True once the trolley is over it.
+        h, d = GameConsts.craneAim(self.index, x, y)
+        h = max(min(h, self.armMaxH), self.armMinH)
+        d = max(min(d, self.craneMaxY), self.craneMinY)
+        dh = self.arm.getH() - h
+        dd = d - self.crane.getY()
+        # Gently with a bag on, so it doesn't swing out.
+        xd = max(-1.0, min(1.0, dh / (10.0 if self.heldObject else 4.0)))
+        yd = max(-1.0, min(1.0, dd / 2.0))
+        if abs(dh) > 0.6 or abs(dd) > 0.3:
+            self.__moveCraneArcHinge(xd, yd)
+            if globalClock.getFrameCount() % 20 == 0:
+                self.__incrementChangeSeq()
+        else:
+            self.__setMoveSound(None)
+        return abs(dh) < 3 and abs(dd) < 1.2
+
+    def __pilotTask(self, task):
+        game = self.craneGame
+        pilot = self.pilot
+        if game is None or pilot is None or not game.isPlaying():
+            return Task.cont
+        now = globalClock.getFrameTime()
+        if now < pilot['until']:
+            return Task.cont
+        held = self.heldObject
+        if pilot['mode'] == 'fetch':
+            if held is not None:
+                pilot['mode'] = 'wait'
+                pilot['until'] = now + random.uniform(0.3, 0.8)
+                return Task.cont
+            bag = pilot['target']
+            if bag is None or bag.isEmpty() or bag.state not in ('Initial', 'Free') or not self.__bagFree(bag):
+                bag = pilot['target'] = self.__pickBag()
+                if bag is None:
+                    self.__pilotSteer(*GameConsts.craneWorld(self.index, 0, 0))
+                    return Task.cont
+            pos = bag.getPos(render)
+            over = self.__pilotSteer(pos[0], pos[1])
+            # Wait for the magnet to stop swinging over the bag.
+            grip = self.gripper.getPos(render) if self.gripper else pos
+            if over and (grip[0] - pos[0]) ** 2 + (grip[1] - pos[1]) ** 2 < 3.0 ** 2:
+                if not self.magnetOn:
+                    self.__turnOnMagnet()
+                    pilot['magnetAt'] = now
+                elif now - pilot.get('magnetAt', now) > 2.5:
+                    # Missed it: let go and come round again.
+                    self.__turnOffMagnet()
+                    pilot['until'] = now + 0.5
+            return Task.cont
+        if held is None:
+            self.__turnOffMagnet()
+            pilot['mode'] = 'fetch'
+            pilot['target'] = None
+            pilot['until'] = now + random.uniform(0.8, 1.6)
+            return Task.cont
+        if not self.magnetOn:
+            self.__turnOnMagnet()
+        cog, aim = self.__pickCog(pilot)
+        if cog is None:
+            # Nothing coming yet: wait over the middle of the lane's reach.
+            self.__pilotSteer(*GameConsts.craneWorld(self.index, 0, 2))
+            return Task.cont
+        bagPos = held.getPos(render)
+        fall = math.sqrt(max(0.0, 2.0 * max(bagPos[2], 0.5) / -GameConsts.Gravity))
+        land = cog.predictPos(fall)
+        over = self.__pilotSteer(aim[0] + pilot['error'][0], aim[1] + pilot['error'][1])
+        if PILOT_DEBUG and now > pilot.get('debugAt', 0):
+            pilot['debugAt'] = now + 1.0
+            self.notify.info('pilot %d: cog %s aim %s land %s bag %s over %s arm %.0f' % (
+                self.index, cog.doId, (round(aim[0], 1), round(aim[1], 1)), land and (round(land[0], 1), round(land[1], 1)),
+                (round(bagPos[0], 1), round(bagPos[1], 1), round(bagPos[2], 1)), over, self.arm.getH()))
+        # Let go when the cog will be under the bag as it lands.
+        if over and land is not None:
+            # Where the NPC thinks the cog will be: off by its misjudgment.
+            dx = land[0] + pilot['error'][0] - bagPos[0]
+            dy = land[1] + pilot['error'][1] - bagPos[1]
+            if dx * dx + dy * dy < 2.2 ** 2:
+                self.__turnOffMagnet()
+                pilot['mode'] = 'fetch'
+                pilot['target'] = None
+                pilot['until'] = now + random.uniform(0.6, 1.4)
+        return Task.cont
+
+    def __cogTakenByOther(self, cog):
+        for crane in self.craneGame.cranes.values():
+            if crane is not self and crane.pilot and crane.pilot.get('cog') is cog and crane.heldObject:
+                return True
+        return False
+
+    def __bagFree(self, bag):
+        return not bag.avId or bag.avId == self.avId
+
+    def __pickBag(self):
+        best = None
+        for bag in self.craneGame.moneyBags.values():
+            if bag.isEmpty() or bag.state not in ('Initial', 'Free') or not self.__bagFree(bag):
+                continue
+            pos = bag.getPos(render)
+            if not GameConsts.inCraneReach(self.index, pos[0], pos[1], slack=-0.5):
+                continue
+            h, d = GameConsts.craneAim(self.index, pos[0], pos[1])
+            cost = abs(self.arm.getH() - h) / 16.0 + abs(self.crane.getY() - d) / 10.0
+            if best is None or cost < best[0]:
+                best = (cost, bag)
+        return best[1] if best else None
+
+    def __pickCog(self, pilot):
+        # The cog to ambush: the one that reaches a spot in reach first.
+        # The spot is fixed ahead of the cog on its lane (where the lane
+        # passes closest to the crane, or a little ahead of the cog if it
+        # is past that), so the bag hangs still over it as the cog walks in.
+        now = globalClock.getFrameTime()
+        hinge = self.hinge.getPos(render)
+        best = None
+        for cog in self.craneGame.cogs.values():
+            if not cog.canBeHit() or cog.state != 'Walk':
+                continue
+            speed = getattr(cog, 'walkSpeed', GameConsts.CogWalkSpeed)
+            dc = GameConsts.HallwayDistance - (now - cog.walkStart) * speed
+            angle = GameConsts.LaneAngles[cog.entranceId]
+            u = GameConsts.lanePoint(angle, 1)
+            # Distance along the lane closest to the hinge.
+            foot = hinge[0] * u[0] + hinge[1] * u[1]
+            ambush = pilot['ambush'].get(cog.doId)
+            if ambush is None or ambush >= dc - 1.0:
+                ambush = min(foot, dc - speed * 2.5)
+            if ambush < GameConsts.MachineDistance + 2:
+                continue
+            p = GameConsts.lanePoint(angle, ambush)
+            if not GameConsts.inCraneReach(self.index, p[0], p[1], slack=-1.0):
+                continue
+            eta = (dc - ambush) / speed
+            # Leave a cog another crane is already after to that crane.
+            if self.__cogTakenByOther(cog):
+                eta += 30
+            if best is None or eta < best[0]:
+                best = (eta, cog, p, ambush)
+        if best is None:
+            pilot['cog'] = None
+            return None, None
+        pilot['ambush'] = {best[1].doId: best[3]}
+        if pilot['cog'] is not best[1]:
+            pilot['cog'] = best[1]
+            # NPC toons misjudge it now and then, as players do.
+            miss = 1.6 if self.avId == base.localAvatar.doId else random.choice((1.0, 1.6, 2.4))
+            pilot['error'] = (random.uniform(-miss, miss), random.uniform(-miss, miss))
+        return best[1], best[2]
 
     def setCraneGameId(self, craneGameId):
         self.craneGameId = craneGameId
@@ -724,6 +943,9 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
             smoother.clearPositions(1)
 
     def setCablePos(self, changeSeq, y, h, links, timestamp):
+        if self.craneGame and self.craneGame.runsHere(self.avId):
+            # Our own report, back again: this client is moving the cable.
+            return
         self.changeSeq = changeSeq
         if self.smoothStarted:
             now = globalClock.getFrameTime()
@@ -791,8 +1013,15 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.grabTrack = self.makeToonGrabInterval(toon)
         if avId == localAvatar.doId:
             self.craneGame.toCraneMode()
-            camera.reparentTo(self.hinge)
-            camera.setPosHpr(0, -20, -5, 0, -20, 0)
+            self.camPivot.setH(self.arm.getH() * self.cameraFollow)
+            camera.reparentTo(self.camPivot)
+            # Back and up a little from the CFO crane camera, so the machine
+            # and both lanes fit in the view.
+            camera.setPosHpr(0, -27, -1, 0, -24, 0)
+            # The crane's own trolley rides right over the camera and
+            # swung or slid into the top of the view, so this toon's camera
+            # doesn't draw it (the cable and the magnet stay in view).
+            self.armModel.hide(base.cam.node().getCameraMask())
             self.tube.stash()
             localAvatar.setPosHpr(self.controls, 0, 0, 0, 0, 0, 0)
             localAvatar.sendCurrentPosition()
@@ -800,6 +1029,11 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
             self.__enableControlInterface()
             self.startPosHprBroadcast()
             self.startShadow()
+        elif self.craneGame.runsHere(avId):
+            # An NPC toon: this client works the crane for it.
+            self.__activatePhysics()
+            toon.stopSmooth()
+            self.grabTrack = Sequence(self.grabTrack, Func(toon.startSmooth), Func(self.__startPilot))
         else:
             self.startSmooth()
             toon.stopSmooth()
@@ -807,8 +1041,11 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
         self.grabTrack.start()
 
     def exitControlled(self):
+        if not hasattr(self, 'grabTrack'):
+            return
         self.grabTrack.finish()
         del self.grabTrack
+        self.__stopPilot()
         if self.toon and not self.toon.isDisabled():
             self.toon.loop('neutral')
             self.toon.startSmooth()
@@ -820,9 +1057,14 @@ class DistCogdoCrane(DistributedObject.DistributedObject, FSM.FSM):
             self.__disableControlInterface()
             self.__deactivatePhysics()
             self.tube.unstash()
+            self.armModel.show(base.cam.node().getCameraMask())
             camera.reparentTo(base.localAvatar)
             camera.setPos(base.localAvatar.cameraPositions[0][0])
             camera.setHpr(0, 0, 0)
+            self.craneGame.toWalkMode()
+        elif self.craneGame and self.craneGame.runsHere(self.avId):
+            self.__turnOffMagnet()
+            self.__deactivatePhysics()
         self.__straightenCable()
 
     def enterFree(self):

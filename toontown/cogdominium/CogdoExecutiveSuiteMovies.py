@@ -1,6 +1,6 @@
 from panda3d.core import NodePath, Point3, PlaneNode, TextNode
 from direct.interval.IntervalGlobal import *
-from direct.showbase.ShowBase import Plane
+from panda3d.core import Plane
 from direct.directnotify import DirectNotifyGlobal
 from direct.showbase.RandomNumGen import RandomNumGen
 from direct.interval.MetaInterval import Sequence, Parallel
@@ -35,6 +35,7 @@ class CogdoExecutiveSuiteIntro(CogdoGameMovie):
         self.toonHead.reparentTo(aspect2d)
         self._toonDialogueSfx.play()
         self.toonHead.setClipPlane(self.clipPlane)
+        CogdoUtil.clipToBox(self.toonHead)
 
     def makeSuit(self, suitType):
         self.notify.debug('makeSuit()')

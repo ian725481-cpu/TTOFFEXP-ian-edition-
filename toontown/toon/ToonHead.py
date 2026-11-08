@@ -81,6 +81,7 @@ class ToonHead(Actor.Actor):
     Muzzle.setMinfilter(Texture.FTLinear)
     Muzzle.setMagfilter(Texture.FTLinear)
     MuzzleSurprised = loader.loadTexture('phase_3/maps/muzzleShortSurprised.jpg')
+    DogLashTexture = None
     MuzzleSurprised.setMinfilter(Texture.FTLinear)
     MuzzleSurprised.setMagfilter(Texture.FTLinear)
     LeftA = Point3(0.06, 0.0, 0.14)
@@ -706,7 +707,23 @@ class ToonHead(Actor.Actor):
                 if animalType != 'dog':
                     self.__lpupil.flattenStrong()
                     self.__rpupil.flattenStrong()
+                self.__sharePupilsWithFarLODs(leye, reye)
         return
+
+    def __sharePupilsWithFarLODs(self, leye, reye):
+        # The farther-away head models (LOD 500 and 250) have eyes of their
+        # own, with pupils frozen in the model's pose and drawn in other
+        # places and sizes, so a toon a little way off looked as if its
+        # pupils had moved or changed size, and they didn't follow where the
+        # toon looked.  Every LOD now shows the near model's eyes and pupils,
+        # which keep moving with where the toon looks.
+        for lodEyes in (self.__lod500Eyes, self.__lod250Eyes):
+            if not lodEyes or lodEyes.isEmpty():
+                continue
+            lodEyes.stash()
+            shown = lodEyes.getParent().attachNewNode('nearEyes')
+            shown.setMat(self.__eyes.getMat())
+            self.__eyes.instanceTo(shown)
 
     def __setPupilDirection(self, x, y):
         if y < 0.0:
@@ -776,6 +793,13 @@ class ToonHead(Actor.Actor):
                 head.setHpr(hpr)
         return reachedTarget
 
+    @staticmethod
+    def dogLashTexture():
+        if ToonHead.DogLashTexture is None:
+            ToonHead.DogLashTexture = loader.loadTexture('phase_3/maps/avatar_palette_2tlla_1.jpg',
+                                                         'phase_3/maps/avatar_palette_2tlla_1_a.rgb')
+        return ToonHead.DogLashTexture
+
     def setupEyelashes(self, style):
         if style.getGender() == 'm':
             if self.__eyelashOpen:
@@ -808,6 +832,13 @@ class ToonHead(Actor.Actor):
                 # Fix eyelash positioning on dog toons
                 eyeOpen.setPos(0, -0.025, 0.025)
                 eyeClosed.setPos(0, -0.025, 0.025)
+                # dog-lashes.bam names its texture avatar_palette_2tlla_1.png,
+                # which the resources only have as a .jpg with an _a.rgb
+                # alpha file. Without it the lashes were drawn as blank white
+                # cards over a girl dog's eyes (white squares).
+                for lashes in (eyeOpen, eyeClosed):
+                    if not lashes.isEmpty() and lashes.findTexture('*') is None:
+                        lashes.setTexture(ToonHead.dogLashTexture(), 1)
             self.__eyelashOpen = eyeOpen.copyTo(head)
             self.__eyelashClosed = eyeClosed.copyTo(head)
             eyeOpen.removeNode()

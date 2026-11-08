@@ -1,0 +1,322 @@
+"""The numbers behind Survival Mode.
+
+A parody of Black Ops 1 zombies played in Toontown Central after dark: cogs
+fall from the sky in rounds, gags are the weapons, jellybeans are the
+points. The round, health and spawn rules follow BO1 (see
+study/survival-design.md in the project files); the gag table scales the
+game's own gag damage by five, which puts a Cupcake where BO1's starting
+pistol is and an Opera Singer where its Thunder Gun is.
+"""
+
+from toontown.toonbase import ToontownBattleGlobals
+
+# --- Players ---
+PLAYER_HP = 100
+TONIC_HP = 250
+# A cog's hit, its reach and the time between its swings.
+COG_HIT = 50
+COG_REACH = 4.6
+# How far above or below a cog a toon can be and still be hit (a step or
+# a ramp, not a floor overhead or a bowl's rim).
+COG_REACH_RISE = 3.5
+COG_SWING_TIME = 1.1
+# Health comes back after a moment out of the cogs' reach.
+REGEN_DELAY = 3.0
+REGEN_DELAY_LOW = 5.0
+REGEN_RATE = 25.0
+LOW_HP = 30
+# Walking, sprinting and jumping, from BO1's player movement (Arthur,
+# 2026-10-31: "study the movement completely"). BO1 walks at 190 units a
+# second with a pistol; backpedalling is 0.7 of that, strafing 0.8 (the
+# walker's 0.75 is close), and a sprint is 1.5x forward only. A sprint
+# lasts 4 seconds; once it runs dry it has to be let go and pressed again,
+# and needs a second's worth back before it starts. Stamin-Up (Sprint
+# Soda) doubles the sprint time and adds 7% to every speed. The toon walk
+# keeps Arthur's 18 (2026-10-30) and everything else follows BO1's ratios.
+WALK_SPEED = 18.0
+# Downed, a toon crawls (BO1's last stand: a slow crawl, still shooting).
+DOWN_CRAWL_SPEED = WALK_SPEED * 0.16
+REVERSE_SCALE = 0.7
+SPRINT_SCALE = 1.5
+SPRINT_SPEED = WALK_SPEED * SPRINT_SCALE
+SPRINT_TIME = 4.0
+SPRINT_MIN = 0.5
+# Seconds to fill an empty sprint meter, after a short breather.
+SPRINT_RECOVER = 5.0
+SPRINT_RECOVER_PAUSE = 0.3
+SPRINT_SODA_SPEED = 1.07
+SPRINT_SODA_TIME = 2.0
+JUMP_FORCE = 24.0
+EYE_HEIGHT = 3.6
+# Downed: a teammate's revive takes this long (hold); bleed out ends it.
+REVIVE_TIME = 4.0
+BLEED_OUT = 45.0
+SECOND_WIND_DELAY = 8.0
+START_BEANS = 500
+
+# --- Rounds (BO1: 150 HP +100/round to 9, then x1.1; counts by the
+# player share and round multiplier; 2 s spawn gap x0.95 a round) ---
+INTERMISSION = 10.0
+
+
+def cogHp(roundNum):
+    if roundNum <= 9:
+        return 150 + 100 * (roundNum - 1)
+    return int(950 * 1.1 ** (roundNum - 9))
+
+
+def cogsInRound(roundNum, npcs):
+    # Arthur (2026-11-01): more cogs a round and more at once.
+    early = (8, 12, 18, 24, 30)
+    if roundNum <= len(early):
+        return early[roundNum - 1] + 3 * npcs
+    share = 0.75 if npcs == 0 else npcs
+    mult = max(1.0, roundNum / 5.0)
+    if roundNum >= 10:
+        mult *= roundNum * 0.15
+    return 32 + int(8 * share * mult)
+
+
+def aliveCap(roundNum, npcs):
+    # Arthur's: 8 at the start rising to 26, a few more with helpers.
+    return min(34, 10 + 3 * (roundNum - 1)) + 2 * npcs
+
+
+def spawnDelay(roundNum):
+    return max(0.25, 2.0 * 0.95 ** (roundNum - 1))
+
+
+# --- Gag-Snatcher rounds (BO1's hellhound rounds): the first between
+# rounds 5 and 7, then every 4 or 5 rounds. Small fast Flunkies with half
+# the HP, in a fog, fewer of them; a Max Gags drops where the last one pops.
+FIRST_SNATCHER_ROUND = (5, 7)
+SNATCHER_ROUND_GAP = (4, 5)
+SNATCHER_HP = 0.5
+SNATCHER_SCALE = 0.8
+SNATCHER_LOOKS = ('f', 'cc', 'sc', 'bf')
+
+
+def snatchersInRound(roundNum, npcs):
+    return min(24, 6 + 2 * (roundNum // 5)) + 2 * npcs
+
+
+# Cog speed classes (walk / jog / sprint) rolled per cog as BO1 does. BO1's
+# shamblers move at about a third of a walking player, its runners about
+# half, and even its sprinters stay a little slower than a player walking
+# forward, which is why "training" works: walk and they follow, stop or
+# backpedal and they catch up. Sprinting pulls well away from all of them.
+COG_SPEEDS = (WALK_SPEED * 0.33, WALK_SPEED * 0.55, WALK_SPEED * 0.85)
+# The walk and run cycles play at the speed the cog really moves: one walk
+# cycle covers about this many feet at play rate 1, one run cycle this many.
+COG_WALK_STRIDE = 5.0
+COG_RUN_STRIDE = 10.0
+
+
+def cogSpeedClass(roundNum, roll):
+    """roll in [0, 1): 0 walk, 1 jog, 2 sprint."""
+    speed = 1 if roundNum == 1 else roundNum * 8
+    score = speed + roll * 35
+    if roundNum >= 9:
+        return 2
+    if score <= 35:
+        return 0
+    if score <= 70 or roundNum < 5:
+        return 1
+    return 2
+
+
+# The cogs that fall in, by round: looks only, the HP is the formula.
+COG_LOOKS = (
+    (1, ('f', 'p', 'bf', 'b', 'sc', 'pp', 'cc', 'tm')),
+    (4, ('ym', 'mm', 'dt', 'ac', 'pp', 'tw', 'nd', 'gh')),
+    (8, ('ds', 'hh', 'bs', 'sd', 'bc', 'nc', 'ms', 'tf')),
+    (13, ('cr', 'tbc', 'le', 'bw', 'mb', 'ls', 'm', 'mh')),
+)
+
+# --- Jellybeans (BO1 points) ---
+BEANS_HIT = 10
+BEANS_KILL = 50
+BEANS_HEAD_KILL = 100
+BEANS_BONK_KILL = 130
+BEANS_TOONADO = 400
+DOWN_LOSS = 0.05
+
+# --- Melee ---
+BONK_DAMAGE = 150
+BONK_REACH = 5.5
+# Ready again the moment the swing ends (Arthur).
+BONK_TIME = 0.6
+
+# --- Stations ---
+TRUNK_COST = 950
+TRUNK_SALE_COST = 10
+TRUNK_CYCLE = 4.0
+TRUNK_OFFER = 10.0
+# A moment after a gag is taken (or sinks back) before the trunk opens
+# again, so one press doesn't take a gag and buy another.
+TRUNK_REUSE = 0.4
+# The Doodle (BO1's teddy bear): never in the first 3 goes, then the odds
+# climb; the trunk shuts for a while and the beans come back.
+DOODLE_ODDS = ((3, 0.0), (7, 0.15), (12, 0.3), (999, 0.5))
+DOODLE_SHUT = 30.0
+# At least this many goes between two Doodles.
+DOODLE_GAP = 3
+MICKEY_COST = 5000
+# The trolley out of Toontown Central wins the game.
+ESCAPE_COST = 100000
+ESCAPE_RANGE = 10.0
+MICKEY_TIME = 5.0
+UPGRADE_MULT = {1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 5}
+
+TONICS = (
+    # key, name, cost, blurb
+    ('toonup', 'Toon-Up Tonic', 2500, 'Laff to 250. Takes five cog hits to go sad.'),
+    ('seltzer', 'Speedy Seltzer', 3000, 'Reload gags twice as fast.'),
+    ('wind', 'Second Wind', 500, 'Go sad and get back up after 8 seconds. Costs your other tonics. Three a game.'),
+    ('sprint', 'Sprint Soda', 2000, 'Sprint faster and twice as long.'),
+    ('tracks', 'Training Tracks', 4000, 'Carry three gags. Go sad and the third is gone.'),
+    ('organic', 'Organic Gags', 3500, 'Fire faster, and every shot hits twice as hard.'),
+)
+# Organic Gags: the time between shots shrinks to this, and a shot counts
+# as two.
+ORGANIC_RATE = 0.7
+ORGANIC_DAMAGE = 2
+TONIC_LIMIT = 4
+# From round 15 Freddy also sells extra tonic slots, 5000 jellybeans each
+# (Arthur), up to one for every tonic he has.
+EXTRA_SLOT_ROUND = 15
+EXTRA_SLOT_COST = 5000
+EXTRA_SLOTS_MAX = len(TONICS) - TONIC_LIMIT
+SECOND_WIND_BUYS = 3
+
+# --- Power-ups (BO1: ~3 % a kill, 4 a round, 26 s on the ground) ---
+DROP_CHANCE = 0.03
+DROP_CHANCE_STEP = 0.03
+DROPS_PER_ROUND = 4
+DROP_LIFE = 26.0
+# BO1: solid for a while, then a slow blink that gets quicker and quicker
+# until it's gone.
+DROP_BLINK = 11.0
+DROP_BLINK_SLOW = 0.5
+DROP_BLINK_FAST = 0.08
+POWER_TIME = 30.0
+POWERUPS = ('maxgags', 'instapop', 'toonado', 'doublebeans', 'trunksale')
+POWERUP_NAMES = {'maxgags': 'Max Gags', 'instapop': 'Insta-Pop', 'toonado': 'Toonado',
+                 'doublebeans': 'Double Beans', 'trunksale': 'Trunk Sale'}
+
+# --- Gags ---
+THROW = ToontownBattleGlobals.THROW_TRACK
+SQUIRT = ToontownBattleGlobals.SQUIRT_TRACK
+SOUND = ToontownBattleGlobals.SOUND_TRACK
+DROP = ToontownBattleGlobals.DROP_TRACK
+LURE = ToontownBattleGlobals.LURE_TRACK
+
+# (track, level): damage, clip, reserve, seconds between shots, splash
+# radius (0 = one cog; sound: the cone's reach), prop name.
+# Arthur (2026-11-01): a lot more of everything, the rapid squirts up to
+# 400, the rest 150-300, the Seltzer a little more than before.
+GAGS = {
+    (THROW, 0): (30, 16, 240, 0.45, 0, 'tart'),
+    (THROW, 1): (50, 16, 240, 0.4, 0, 'fruitpie-slice'),
+    (THROW, 2): (85, 10, 180, 0.5, 0, 'creampie-slice'),
+    (THROW, 3): (135, 12, 200, 0.4, 2, 'fruitpie'),
+    (THROW, 4): (200, 8, 160, 0.55, 2.5, 'creampie'),
+    (THROW, 5): (500, 4, 60, 0.8, 4, 'birthday-cake'),
+    (THROW, 6): (600, 3, 45, 0.9, 6, 'wedding-cake'),
+    (SQUIRT, 0): (20, 30, 300, 0.12, 0, 'squirting-flower'),
+    (SQUIRT, 1): (40, 30, 300, 0.12, 0, 'glass'),
+    (SQUIRT, 2): (60, 40, 400, 0.1, 0, 'water-gun'),
+    (SQUIRT, 3): (105, 40, 360, 0.1, 0, 'bottle'),
+    (SQUIRT, 4): (150, 50, 400, 0.08, 0, 'firehose'),
+    (SQUIRT, 5): (400, 6, 60, 0.7, 5, 'stormcloud'),
+    (SQUIRT, 6): (525, 2, 24, 1.0, 7, 'geyser'),
+    (SOUND, 0): (20, 8, 160, 0.5, 22, 'bikehorn'),
+    (SOUND, 1): (35, 8, 160, 0.5, 24, 'whistle'),
+    (SOUND, 2): (55, 6, 150, 0.6, 26, 'bugle'),
+    (SOUND, 3): (80, 6, 150, 0.6, 28, 'aoogah'),
+    (SOUND, 4): (105, 5, 150, 0.7, 30, 'elephant'),
+    (SOUND, 5): (250, 4, 72, 0.9, 32, 'fog_horn'),
+    (SOUND, 6): (450, 4, 40, 1.5, 38, 'singing'),
+    (DROP, 0): (50, 6, 160, 0.6, 2, 'flowerpot'),
+    (DROP, 1): (90, 6, 160, 0.6, 2.5, 'sandbag'),
+    (DROP, 2): (150, 5, 150, 0.7, 3, 'anvil'),
+    (DROP, 3): (225, 4, 150, 0.8, 3.5, 'weight'),
+    (DROP, 4): (300, 3, 120, 0.9, 4, 'safe'),
+    (DROP, 5): (850, 2, 40, 1.2, 5, 'piano'),
+    (DROP, 6): (900, 1, 36, 1.5, 9, 'ship'),
+}
+# Arthur (2026-10-30): Drop and Sound hit harder than the table above.
+DROP_SOUND_BOOST = 1.5
+for _key in list(GAGS):
+    if _key[0] in (DROP, SOUND):
+        _row = GAGS[_key]
+        GAGS[_key] = (int(_row[0] * DROP_SOUND_BOOST),) + _row[1:]
+# Arthur (2026-11-01): the first five levels were too weak by round 8.
+LOW_LEVEL_BOOST = 1.8
+for _key in list(GAGS):
+    if _key[1] < 5:
+        _row = GAGS[_key]
+        GAGS[_key] = (int(_row[0] * LOW_LEVEL_BOOST),) + _row[1:]
+del _key, _row
+# Mickey's upgrade (and a Max Gags after it) carries this many times the
+# reserve.
+UPGRADE_RESERVE = 2.5
+# Hits from the neck up.
+HEAD_MULT = 2.0
+# What the trunk hands out: every gag but the level 7s, no Toon-Up, no
+# Trap, Lure only as the Presentation.
+PRESENTATION = (LURE, 6)
+TRUNK_GAGS = [key for key in GAGS if key[1] < 6] + [PRESENTATION]
+# The Presentation (BO1's special grenade): three of them when the trunk
+# gives it, and a Max Gags fills them back to three from then on.
+PRESENTATION_MAX = 3
+PRESENTATION_LURE = 15.0
+PRESENTATION_RANGE = 40.0
+PRESENTATION_DAMAGE = 500
+PRESENTATION_POP = 8.0
+STARTING_GAG = (THROW, 0)
+
+# --- TNT (BO1's frag grenades) ---
+# Two more every round, four at most; a Max Gags fills them up. Thrown in
+# an arc, it bounces and goes off TNT_FUSE seconds after leaving the hand.
+# BO1 frags kill outright in the early rounds and fall off as the zombies'
+# health grows past them (around round 10): the blast's middle does
+# 150 + 100 a round (most 1500), the edge a quarter of it. Like a frag,
+# it can hurt the toon who threw it.
+TNT_PER_ROUND = 2
+TNT_MAX = 4
+# BO1's frag fuse runs from the moment it is pressed (cooking).
+TNT_FUSE = 3.5
+TNT_RADIUS = 15.0
+TNT_THROW_SPEED = 38.0
+TNT_THROW_UP = 12.0
+TNT_GRAVITY = 64.0
+TNT_SELF_DAMAGE = 60
+TNT_SELF_RADIUS = 8.0
+
+
+def tntDamage(roundNum):
+    return min(1500, 150 + 100 * roundNum)
+GAG_SLOTS = 2
+RELOAD_TIME = 1.8
+# Throw and Squirt fly this fast; Drop gags fall onto the aim point.
+PROJECTILE_SPEED = 60.0
+DROP_FALL = 0.4
+MAX_RANGE = 90.0
+
+
+def npcDamage(roundNum):
+    """An NPC teammate's throw: about six hits a cog, so they help
+    without carrying the game."""
+    return max(30, cogHp(roundNum) // 6)
+
+
+def gagName(track, level):
+    return ToontownBattleGlobals.AvPropStrings[track][level]
+
+
+def gagDamage(track, level, upgraded):
+    damage = GAGS[(track, level)][0]
+    if upgraded:
+        damage *= UPGRADE_MULT[level + 1]
+    return damage

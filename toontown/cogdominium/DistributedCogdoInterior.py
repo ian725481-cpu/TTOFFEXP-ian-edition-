@@ -3,7 +3,7 @@ from direct.interval.IntervalGlobal import *
 from direct.distributed.ClockDelta import *
 from toontown.building.ElevatorConstants import *
 from toontown.toon import NPCToons
-from panda3d.core import NodePath
+from panda3d.core import CollisionNode, CollisionPolygon, NodePath
 from toontown.building import ElevatorUtils
 from toontown.toonbase import ToontownGlobals
 from toontown.toonbase import ToontownBattleGlobals
@@ -16,11 +16,13 @@ from toontown.battle import BattleBase
 from toontown.hood import ZoneUtil
 from toontown.cogdominium.CogdoLayout import CogdoLayout
 from toontown.cogdominium import CogdoGameConsts
+from toontown.cogdominium import CogdoUtil
 from toontown.cogdominium import CogdoBarrelRoom, CogdoBarrelRoomConsts
 from toontown.distributed import DelayDelete
 from toontown.toonbase import TTLocalizer
 from .CogdoExecutiveSuiteMovies import CogdoExecutiveSuiteIntro
 from .CogdoElevatorMovie import CogdoElevatorMovie
+from otp.nametag.NametagConstants import CFSpeech
 PAINTING_DICT = {'s': 'tt_m_ara_crg_paintingMoverShaker',
  'l': 'tt_m_ara_crg_paintingLegalEagle',
  'm': 'tt_m_ara_crg_paintingMoverShaker',
@@ -80,7 +82,7 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
         self.elevatorMusic = base.loader.loadMusic('phase_7/audio/bgm/tt_elevator.ogg')
         self.fsm = ClassicFSM.ClassicFSM('DistributedCogdoInterior', [State.State('WaitForAllToonsInside', self.enterWaitForAllToonsInside, self.exitWaitForAllToonsInside, ['Elevator']),
          State.State('Elevator', self.enterElevator, self.exitElevator, ['Game']),
-         State.State('Game', self.enterGame, self.exitGame, ['Resting', 'Failed', 'BattleIntro']),
+         State.State('Game', self.enterGame, self.exitGame, ['Resting', 'Failed', 'BattleIntro', 'Elevator']),
          State.State('BarrelRoomIntro', self.enterBarrelRoomIntro, self.exitBarrelRoomIntro, ['CollectBarrels', 'Off']),
          State.State('CollectBarrels', self.enterCollectBarrels, self.exitCollectBarrels, ['BarrelRoomReward', 'Off']),
          State.State('BarrelRoomReward', self.enterBarrelRoomReward, self.exitBarrelRoomReward, ['Battle',
@@ -125,10 +127,10 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
         DistributedObject.DistributedObject.generate(self)
         self.announceGenerateName = self.uniqueName('generate')
         self.accept(self.announceGenerateName, self.handleAnnounceGenerate)
-        self.elevatorModelIn = loader.loadModel('phase_5/models/cogdominium/tt_m_ara_csa_elevatorB')
+        self.elevatorModelIn = CogdoUtil.loadElevatorModel()
         self.leftDoorIn = self.elevatorModelIn.find('**/left_door')
         self.rightDoorIn = self.elevatorModelIn.find('**/right_door')
-        self.elevatorModelOut = loader.loadModel('phase_5/models/cogdominium/tt_m_ara_csa_elevatorB')
+        self.elevatorModelOut = CogdoUtil.loadElevatorModel()
         self.leftDoorOut = self.elevatorModelOut.find('**/left_door')
         self.rightDoorOut = self.elevatorModelOut.find('**/right_door')
 
@@ -426,6 +428,11 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
                     paintingModel = loader.loadModel('phase_5/models/cogdominium/%s' % paintingModelName)
                     loc = self.floorModel.find('**/loc_painting%d' % (i + 1))
                     paintingModel.reparentTo(loc)
+                    if self.FOType == 'm':
+                        # Cashbot offices share the Mover & Shaker painting;
+                        # give it the Loan Shark poster from the building.
+                        from toontown.building.DistributedBuilding import DistributedBuilding
+                        DistributedBuilding.retextureCashbotFieldOffice(DistributedBuilding, paintingModel)
 
             SuitHs = self.BossOffice_SuitHs
             SuitPositions = self.BossOffice_SuitPositions
@@ -489,14 +496,60 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
         camera.setP(0)
         camera.setPos(0, 14, 4)
         base.playMusic(self.elevatorMusic, looping=1, volume=0.8)
-        track = Sequence(Func(base.transitions.noTransitions), ElevatorUtils.getRideElevatorInterval(ELEVATOR_NORMAL), ElevatorUtils.getOpenInterval(self, self.leftDoorIn, self.rightDoorIn, self.openSfx, None, type=ELEVATOR_NORMAL), Func(camera.wrtReparentTo, render))
-        for toon in self.toons:
-            track.append(Func(toon.wrtReparentTo, render))
-
-        track.append(Func(callback))
+        # While the toons ride, the floor's game loads its room around the
+        # elevator (see CogdoUtil.takeToon); the doors wait for it, so they
+        # open onto the room and not onto an empty grey space.
+        self.elevatorModelIn.setPythonTag(CogdoUtil.RIDING_TAG, True)
+        openTrack = Sequence(ElevatorUtils.getOpenInterval(self, self.leftDoorIn, self.rightDoorIn, self.openSfx, None, type=ELEVATOR_NORMAL), Func(self.__letToonsOut))
+        # The game before this floor can unload during the ride: finishing
+        # its end movie runs that movie's iris out after the one cleared at
+        # the start, and the screen stayed black for the rest of the office.
+        # The doors are open now, so the screen must be too.
+        openTrack.append(Func(base.transitions.noTransitions))
+        openTrack.append(Func(callback))
+        waitForGame = not self.isBossFloor(self.currentFloor)
+        track = Sequence(Func(base.transitions.noTransitions), ElevatorUtils.getRideElevatorInterval(ELEVATOR_NORMAL), Func(self.__openElevatorDoors, name, openTrack, waitForGame))
         track.start(ts)
         self.activeIntervals[name] = track
         return
+
+    # The longest the doors wait for the floor's game to load (the server
+    # starts the game anyway a little after the ride).
+    GameLoadWait = 12.0
+
+    def isRidingElevator(self):
+        return self.elevatorModelIn is not None and self.elevatorModelIn.hasPythonTag(CogdoUtil.RIDING_TAG)
+
+    def __gameReady(self):
+        game = getattr(base, 'cogdoGame', None)
+        return game is not None and getattr(game, '_interiorId', None) == self.doId and game.isVisible()
+
+    def __openElevatorDoors(self, name, openTrack, waitForGame):
+        taskName = self.uniqueName('waitForCogdoGame')
+        taskMgr.remove(taskName)
+        if not waitForGame or self.__gameReady():
+            self.activeIntervals[name] = openTrack
+            openTrack.start()
+            return
+        deadline = globalClock.getFrameTime() + self.GameLoadWait
+
+        def wait(task):
+            if self.__gameReady() or globalClock.getFrameTime() > deadline:
+                self.activeIntervals[name] = openTrack
+                openTrack.start()
+                return task.done
+            return task.cont
+
+        taskMgr.add(wait, taskName)
+
+    def __letToonsOut(self):
+        if not self.isRidingElevator():
+            return
+        self.elevatorModelIn.clearPythonTag(CogdoUtil.RIDING_TAG)
+        camera.wrtReparentTo(render)
+        for toon in self.toons:
+            if not toon.isEmpty():
+                toon.wrtReparentTo(render)
 
     def enterElevator(self, ts = 0):
         if not self._CogdoGameRepeat:
@@ -524,6 +577,10 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
             self._movie.end()
             self.__cleanupPenthouseIntro()
         self.__finishInterval(self.elevatorName)
+        taskMgr.remove(self.uniqueName('waitForCogdoGame'))
+        # Finishing the ride can start the doors opening: finish that too.
+        self.__finishInterval(self.elevatorName)
+        self.__letToonsOut()
         return None
 
     def __setupBarrelRoom(self):
@@ -674,6 +731,25 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
         self.__closeInElevator()
         self._haveEntranceElevator.set(False)
         self._stashEntranceElevator.set(False)
+        self.__makeRestingFloor()
+
+    def __makeRestingFloor(self):
+        # After a game floor (flying, maze) the exit elevator stands in an
+        # empty room with no floor, so toons drifted up into the air on the
+        # walk over. Give that room a flat floor level with the elevator's.
+        self.__removeRestingFloor()
+        if self.floorModel or (self._wantBarrelRoom and self.barrelRoom.isLoaded()):
+            return
+        poly = CollisionPolygon(Point3(-30, -40, 0), Point3(30, -40, 0), Point3(30, 0, 0), Point3(-30, 0, 0))
+        node = CollisionNode('restingFloor')
+        node.addSolid(poly)
+        node.setIntoCollideMask(ToontownGlobals.FloorBitmask)
+        self._restingFloor = self.elevOut.attachNewNode(node)
+
+    def __removeRestingFloor(self):
+        if getattr(self, '_restingFloor', None) is not None:
+            self._restingFloor.removeNode()
+            self._restingFloor = None
 
     def _setAvPosToExit(self):
         base.localAvatar.setPos(self.elevOut, 0, -10, 0)
@@ -682,6 +758,7 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
 
     def exitResting(self):
         self._setAvPosFDC.destroy()
+        self.__removeRestingFloor()
         self.waitMusic.stop()
 
     def enterReward(self, ts = 0):
@@ -694,6 +771,7 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
 
     def exitReward(self):
         self.notify.debug('exitReward')
+        taskMgr.remove(self.uniqueName('outroHold'))
         if self.penthouseOutroTrack:
             self.penthouseOutroTrack.finish()
             DelayDelete.cleanupDelayDeletes(self.penthouseOutroTrack)
@@ -751,13 +829,27 @@ class DistributedCogdoInterior(DistributedObject.DistributedObject):
         trackName = '__outroPenthouse-%d' % avatar.doId
         track = Parallel(name=trackName)
         base.cr.playGame.getPlace().fsm.request('stopped')
-        speech = TTLocalizer.CogdoExecutiveSuiteToonThankYou % self.SOSToonName
+        if self.FOType == 'm':
+            speech = TTLocalizer.CogdoExecutiveSuiteToonThankYouMini
+        else:
+            speech = TTLocalizer.CogdoExecutiveSuiteToonThankYou % self.SOSToonName
         track.append(Sequence(Func(camera.wrtReparentTo, localAvatar), Func(camera.setPos, 0, -9, 9), Func(camera.lookAt, Point3(5, 15, 0)), Parallel(self.cage.posInterval(0.75, self.cagePos[1], blendType='easeOut'), SoundInterval(self.cageLowerSfx, duration=0.5)), Parallel(self.cageDoor.hprInterval(0.5, VBase3(0, 90, 0), blendType='easeOut'), Sequence(SoundInterval(self.cageDoorSfx), duration=0)), Wait(0.25), Func(self.shopOwnerNpc.wrtReparentTo, render), Func(self.shopOwnerNpc.setScale, 1), Func(self.shopOwnerNpc.loop, 'walk'), Func(self.shopOwnerNpc.headsUp, Point3(0, 10, 0)), ParallelEndTogether(self.shopOwnerNpc.posInterval(1.5, Point3(0, 10, 0)), self.shopOwnerNpc.hprInterval(0.5, VBase3(180, 0, 0), blendType='easeInOut')), Func(self.shopOwnerNpc.setChatAbsolute, TTLocalizer.CagedToonYippee, CFSpeech), ActorInterval(self.shopOwnerNpc, 'jump'), Func(self.shopOwnerNpc.loop, 'neutral'), Func(self.shopOwnerNpc.headsUp, localAvatar), Func(self.shopOwnerNpc.setLocalPageChat, speech, 0), Func(camera.lookAt, self.shopOwnerNpc, Point3(0, 0, 2))))
         self.activeIntervals[trackName] = track
         self.accept('doneChatPage', self.__outroPenthouseChatDone)
+        # The battle may still be handing the toon back to walking when the
+        # thank-you starts (the toon walked about while clicking through the
+        # SOS card's pages): hold the toon still until the thank-you is over.
+        taskMgr.add(self.__holdForOutro, self.uniqueName('outroHold'))
         return track
 
+    def __holdForOutro(self, task):
+        place = base.cr.playGame.getPlace()
+        if place and place.fsm.getCurrentState().getName() == 'walk':
+            place.fsm.request('stopped')
+        return task.cont
+
     def __outroPenthouseChatDone(self, elapsed = None):
+        taskMgr.remove(self.uniqueName('outroHold'))
         self.shopOwnerNpc.setChatAbsolute(TTLocalizer.CogdoExecutiveSuiteToonBye, CFSpeech)
         self.ignore('doneChatPage')
         track = Parallel(Sequence(ActorInterval(self.shopOwnerNpc, 'wave'), Func(self.shopOwnerNpc.loop, 'neutral')), Sequence(Wait(2.0), Func(self.exitCogdoBuilding), Func(base.camLens.setFov, ToontownGlobals.DefaultCameraFov)))

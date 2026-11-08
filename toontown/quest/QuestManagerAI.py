@@ -3,6 +3,10 @@ from direct.directnotify.DirectNotifyGlobal import directNotify
 from toontown.toonbase import ToontownBattleGlobals
 import random
 
+def fieldOfficeLevel(difficulty):
+    return max(1, min(5, difficulty // 2 + 1))
+
+
 class QuestManagerAI:
     notify = directNotify.newCategory('QuestManagerAI')
     def __init__(self, air):
@@ -117,8 +121,13 @@ class QuestManagerAI:
                                 self.__incrementQuestProgress(toon.quests[index])
         toon.updateQuests()
 
-    def toonKilledCogdo(self, toon, difficulty, floors, zoneId, activeToons):
-        pass
+    def toonKilledCogdo(self, toon, track, difficulty, floors, zoneId, activeToons):
+        # A field office counts for building tasks of its department (or
+        # any department) as a building as tall as its level: a 4+ story
+        # task needs a level 4 or 5 field office. Its level comes from its
+        # difficulty (levels 1-5 are difficulties 0, 2, 4, 6, 8; see
+        # DistributedBuildingAI.FieldOfficeLevels).
+        self.toonKilledBuilding(toon, track, difficulty, fieldOfficeLevel(difficulty), zoneId, activeToons)
 
     def toonRecoveredCogSuitPart(self, toon, zoneId, toonList):
         pass
@@ -196,6 +205,11 @@ class QuestManagerAI:
         # This means we want to store the reward in the toons setRewardHistory.
         finalReward = rewardId if storeReward else 0
         progress = 0
+        quest = Quests.getQuest(questId)
+        if isinstance(quest, Quests.FriendQuest):
+            # Offline there is nobody to befriend, so "Make a Friend" tasks
+            # are complete the moment they are taken: just hand them back in.
+            progress = quest.getNumFriends() if isinstance(quest, Quests.FriendNewbieQuest) else 1
         toon.addQuest((questId, npc.getDoId(), toNpcId, rewardId, progress), finalReward)
         # Tell the NPC that we assigned this quest to the given toon.
         npc.assignQuest(toon.getDoId(), questId, rewardId, toNpcId)

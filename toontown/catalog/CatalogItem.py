@@ -256,10 +256,36 @@ class CatalogItem:
         return None
 
     def __cmp__(self, other):
-        c = cmp(self.__class__, other.__class__)
-        if c != 0:
-            return c
-        return self.compareTo(other)
+        if self.__class__ is not other.__class__:
+            # Python 2 ordered different classes consistently; order them by name.
+            a, b = self.__class__.__name__, other.__class__.__name__
+            return ((a > b) - (a < b)) or 1
+        c = self.compareTo(other)
+        return (c > 0) - (c < 0)
+
+    # Python 3 ignores __cmp__, but catalog lists rely on its equality and
+    # ordering (in, remove, index, sort).
+    def __eq__(self, other):
+        if not isinstance(other, CatalogItem):
+            return NotImplemented
+        return self.__cmp__(other) == 0
+
+    def __ne__(self, other):
+        if not isinstance(other, CatalogItem):
+            return NotImplemented
+        return self.__cmp__(other) != 0
+
+    def __lt__(self, other):
+        return self.__cmp__(other) < 0
+
+    def __le__(self, other):
+        return self.__cmp__(other) <= 0
+
+    def __gt__(self, other):
+        return self.__cmp__(other) > 0
+
+    def __ge__(self, other):
+        return self.__cmp__(other) >= 0
 
     def __hash__(self):
         return hash((self.__class__, self.getHashContents()))
@@ -316,9 +342,12 @@ class CatalogItem:
             dg.putArg(self.posHpr[0], STInt16, 10)
             dg.putArg(self.posHpr[1], STInt16, 10)
             dg.putArg(self.posHpr[2], STInt16, 100)
-            dg.putArg(self.posHpr[3], STInt8, 256 // 360)
-            dg.putArg(self.posHpr[4], STInt8, 256 // 360)
-            dg.putArg(self.posHpr[5], STInt8, 256 // 360)
+            # Angles go in a signed byte: -180 up to (not quite) 180. The
+            # Python 3 port scaled them by 256 // 360, which is 0, so every
+            # piece of furniture was saved facing the same way.
+            for angle in self.posHpr[3:6]:
+                angle = (angle + 180.0) % 360.0 - 180.0
+                dg.putArg(min(127, int(round(angle * 256.0 / 360.0))), STInt8)
         if store & GiftTag:
             dg.addBlob(self.giftTag)
         dg.addUint8(self.specialEventId)
@@ -334,7 +363,7 @@ class CatalogItem:
             matches = model.findAllMatches(partName)
             if color == None:
                 matches.hide()
-            elif isinstance(color, bytes):
+            elif isinstance(color, str):
                 tex = loader.loadTexture(color)
                 tex.setMinfilter(Texture.FTLinearMipmapLinear)
                 tex.setMagfilter(Texture.FTLinear)

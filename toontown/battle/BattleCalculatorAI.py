@@ -1,6 +1,7 @@
 from .BattleBase import *
 from toontown.toonbase.ToontownBattleGlobals import *
 import random
+from toontown.toonbase import ToontownGlobals, GameSettings
 from toontown.suit import DistributedSuitBaseAI
 from . import SuitBattleGlobals
 from . import BattleExperienceAI
@@ -722,7 +723,13 @@ class BattleCalculatorAI:
                  0,
                  0]
                 self.toonSkillPtsGained[id] = expList
-            expList[trk] = min(ExperienceCap, expList[trk] + (lvl + 1) * self.__skillCreditMultiplier)
+            mult = self.__skillCreditMultiplier
+            if simbase.air.holidayManager.isHolidayRunning(ToontownGlobals.MORE_XP_HOLIDAY):
+                mult *= getMoreXpHolidayMultiplier()
+            # Double XP for gags (Shticker Book > Settings > Double XP).
+            if GameSettings.isPlayerToon(simbase.air.doId2do.get(id)):
+                mult *= GameSettings.getXpMultiplier(GameSettings.DOUBLE_XP_GAGS)
+            expList[trk] = min(ExperienceCap, expList[trk] + (lvl + 1) * mult)
         return
 
     def __clearTgtDied(self, tgt, lastAtk, currAtk):
@@ -961,8 +968,8 @@ class BattleCalculatorAI:
     def __clearLuredSuitsByAttack(self, toonId, kbBonusReq = 0, targetId = -1):
         if self.notify.getDebug():
             self.notify.debug('__clearLuredSuitsByAttack')
-        if targetId != -1 and self.__suitIsLured(t.getDoId()):
-            self.__removeLured(t.getDoId())
+        if targetId != -1 and self.__suitIsLured(targetId):
+            self.__removeLured(targetId)
         else:
             tgtList = self.__createToonTargetList(toonId)
             for t in tgtList:

@@ -1,6 +1,7 @@
 import math
 import random
 from enum import Enum
+from otp.otpbase.PythonEnum import IntEnum
 from panda3d.core import Vec3
 from direct.showbase import PythonUtil
 from direct.directnotify import DirectNotifyGlobal
@@ -29,10 +30,10 @@ class CogdoFlyingLocalPlayer(CogdoFlyingPlayer):
     PlayWaitingMusicEventName = 'PlayWaitingMusicEvent'
     RanOutOfTimeEventName = 'RanOutOfTimeEvent'
     #PropStates = PythonUtil.Enum(('Normal', 'Overdrive', 'Off'))
-    class PropStates(Enum):
-        Normal = 1
-        Overdrive = 2
-        Off = 3
+    class PropStates(IntEnum):
+        Normal = 0
+        Overdrive = 1
+        Off = 2
 
     def __init__(self, toon, game, level, guiMgr):
         CogdoFlyingPlayer.__init__(self, toon)
@@ -319,7 +320,9 @@ class CogdoFlyingLocalPlayer(CogdoFlyingPlayer):
             self.isToonOnFloor = False
             taskMgr.remove('delayedLandOnPlatform')
             taskMgr.remove('delayedLandOnWinPlatform')
-            if self.state not in ['FlyingUp', 'Spawn']:
+            # A toon waiting on the win platform stays put; sliding off its
+            # floor polygon while the others land is no reason to fly.
+            if self.state not in ['FlyingUp', 'Spawn', 'WaitingForWin', 'Win']:
                 self.notify.debug('Exited floor')
                 self.request('FreeFly')
 
@@ -705,15 +708,26 @@ class CogdoFlyingLocalPlayer(CogdoFlyingPlayer):
         else:
             return False
 
+    # The keys that start flying from a platform. The original game used
+    # Control; the jump button (Space, the controller's A, the touch Jump
+    # button) is what flies once in the air, so it takes off too.
+    FLY_KEYS = ('space', 'control', 'lcontrol')
+
+    def acceptFlyKeys(self):
+        for key in self.FLY_KEYS:
+            self.acceptOnce(key, self.pressedControlWhileRunning)
+
+    def ignoreFlyKeys(self):
+        for key in self.FLY_KEYS:
+            self.ignore(key)
+
     def pressedControlWhileRunning(self):
         if self.isFuelLeft() and self.state == 'Running':
             self.notify.debug('Pressed Control and have fuel')
             self.request('FlyingUp')
         else:
-            self.ignore('control')
-            self.ignore('lcontrol')
-            self.acceptOnce('control', self.pressedControlWhileRunning)
-            self.acceptOnce('lcontrol', self.pressedControlWhileRunning)
+            self.ignoreFlyKeys()
+            self.acceptFlyKeys()
 
     def setPropellerState(self, propState):
         if not self.hasPickedUpFirstPropeller:
@@ -871,10 +885,8 @@ class CogdoFlyingLocalPlayer(CogdoFlyingPlayer):
             self._collideSfx.play()
         self.orthoWalk.start()
         self.setPropellerState(CogdoFlyingLocalPlayer.PropStates.Normal)
-        self.ignore('control')
-        self.ignore('lcontrol')
-        self.acceptOnce('control', self.pressedControlWhileRunning)
-        self.acceptOnce('lcontrol', self.pressedControlWhileRunning)
+        self.ignoreFlyKeys()
+        self.acceptFlyKeys()
 
     def filterRunning(self, request, args):
         if request == self.state:
@@ -886,8 +898,7 @@ class CogdoFlyingLocalPlayer(CogdoFlyingPlayer):
     def exitRunning(self):
         CogdoFlyingLocalPlayer.notify.debug("exit%s: '%s' -> '%s'" % (self.oldState, self.oldState, self.newState))
         self.orthoWalk.stop()
-        self.ignore('control')
-        self.ignore('lcontrol')
+        self.ignoreFlyKeys()
 
     def enterOutOfTime(self):
         CogdoFlyingLocalPlayer.notify.info("enter%s: '%s' -> '%s'" % (self.newState, self.oldState, self.newState))

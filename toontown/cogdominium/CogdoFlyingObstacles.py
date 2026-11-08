@@ -1,5 +1,6 @@
 import random
 from enum import Enum
+from otp.otpbase.PythonEnum import IntEnum
 from direct.showbase.DirectObject import DirectObject
 from direct.interval.IntervalGlobal import LerpFunc, ActorInterval, LerpPosInterval
 from direct.interval.MetaInterval import Sequence
@@ -30,9 +31,6 @@ class CogdoFlyingObtacleFactory:
         del self._whirlwindModel
         self._fanModel.removeNode()
         del self._fanModel
-        if Globals.Level.AddParticlesToStreamers:
-            self.f.cleanup()
-            del self.f
 
     def createFan(self):
         self._index += 1
@@ -51,12 +49,14 @@ class CogdoFlyingObtacleFactory:
         return CogdoFlyingWhirlwind(self._index, self._whirlwindModel, motionPath=motionPath)
 
     def createStreamerParticles(self, color1, color2, amp):
-        self.f = ParticleEffect.ParticleEffect('streamer_particles')
+        f = ParticleEffect.ParticleEffect('streamer_particles')
         p0 = Particles.Particles('particles-1')
         p0.setFactory('PointParticleFactory')
         p0.setRenderer('SparkleParticleRenderer')
         p0.setEmitter('RingEmitter')
-        p0.setPoolSize(80)
+        # 48 instead of 80: the sparkle renderer rebuilds every particle each
+        # frame, and the fans were most of the game's particle time.
+        p0.setPoolSize(48)
         p0.setBirthRate(0.05)
         p0.setLitterSize(100)
         p0.setLitterSpread(0)
@@ -81,21 +81,21 @@ class CogdoFlyingObtacleFactory:
         force0.setVectorMasks(1, 1, 1)
         force0.setActive(1)
         f0.addForce(force0)
-        self.f.addForceGroup(f0)
+        f.addForceGroup(f0)
         p0.emitter.setRadius(5.0)
-        self.f.addParticles(p0)
-        self.f.setPos(0, 0, 0)
-        self.f.setHpr(0, 0, 0)
-        return self.f
+        f.addParticles(p0)
+        f.setPos(0, 0, 0)
+        f.setHpr(0, 0, 0)
+        return f
 
 
 class CogdoFlyingObstacle(DirectObject):
     EnterEventName = 'CogdoFlyingObstacle_Enter'
     ExitEventName = 'CogdoFlyingObstacle_Exit'
     #MotionTypes = PythonUtil.Enum(('BackForth', 'Loop'))
-    class MotionTypes(Enum):
-        BackForth = 1
-        Loop = 2
+    class MotionTypes(IntEnum):
+        BackForth = 0
+        Loop = 1
 
     def __init__(self, type, index, model, collSolid, motionPath = None, motionPattern = None, blendMotion = True, instanceModel = True):
         self.type = type

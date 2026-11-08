@@ -16,6 +16,8 @@ import re
 from toontown.toonbase import TTLocalizer
 from . import NameGenerator
 import random
+from toontown.toonbase import AndroidKeyboard
+from toontown.toon import NewToonAccessories
 from otp.distributed import PotentialAvatar
 from otp.namepanel import NameCheck
 from toontown.toontowngui import TeaserPanel
@@ -82,6 +84,7 @@ class NameShop(StateData.StateData):
          State.State('PickAName', self.enterPickANameState, self.exitPickANameState, ['TypeAName', 'Done']),
          State.State('TypeAName', self.enterTypeANameState, self.exitTypeANameState, ['PickAName',
           'Approval',
+          'ApprovalAccepted',
           'Accepted',
           'Rejected']),
          State.State('Approval', self.enterApprovalState, self.exitApprovalState, ['PickAName', 'ApprovalAccepted']),
@@ -395,7 +398,7 @@ class NameShop(StateData.StateData):
         self.nameMessages = OnscreenText.OnscreenText(TTLocalizer.NameMessages, parent=aspect2d, style=OnscreenText.ScreenPrompt, scale=0.06, pos=(-0.0163333, -0.05))
         self.nameMessages.wrtReparentTo(self.typeNamePanel, sort=2)
         self.typeANameGUIElements.append(self.nameMessages)
-        self.nameEntry = DirectEntry(parent=aspect2d, relief=None, scale=TTLocalizer.NSnameEntry, entryFont=getToonFont(), width=MAX_NAME_WIDTH, numLines=2, focus=0, cursorKeys=1, pos=(0.0, 0.0, 0.39), text_align=TextNode.ACenter, command=self.__typedAName, autoCapitalize=1)
+        self.nameEntry = DirectEntry(parent=aspect2d, relief=None, scale=TTLocalizer.NSnameEntry, entryFont=getToonFont(), width=MAX_NAME_WIDTH, numLines=2, focus=0, cursorKeys=1, pos=(0.0, 0.0, 0.39), text_align=TextNode.ACenter, command=self.__typedAName, autoCapitalize=0)
         self.nameEntry.wrtReparentTo(self.typeNamePanel, sort=2)
         self.typeANameGUIElements.append(self.nameEntry)
         self.submitButton = DirectButton(parent=aspect2d, relief=None, image=(self.squareUp,
@@ -549,9 +552,11 @@ class NameShop(StateData.StateData):
         self.notify.debug('nameIsValid')
         if name in self.usedNames:
             return TTLocalizer.ToonAlreadyExists % name
-        problem = NameCheck.checkName(name, [self._checkNpcNames], font=self.nameEntry.getFont())
-        if problem:
-            return problem
+        # Offline there is no name filter (Arthur): capitals, numbers,
+        # underscores and any other characters are fine. Only an empty name
+        # is turned down.
+        if not name.strip():
+            return TTLocalizer.EmptyNameError
         return None
 
     def setShopsVisited(self, list):
@@ -575,7 +580,7 @@ class NameShop(StateData.StateData):
 
     def __createAvatar(self, skipTutorial = False, *args):
         self.notify.debug('__createAvatar')
-        if self.fsm.getCurrentState().getName() == 'TypeAName':
+        if self.fsm.getCurrentState().getName() == 'TypeAName' and self.nameEntry.get() != getattr(self, 'typedNameAccepted', None):
             self.__typedAName()
             return
         if not self.avExists or self.avExists and self.avId == 'deleteMe':
@@ -607,6 +612,8 @@ class NameShop(StateData.StateData):
     def __handleReject(self):
         self.rejectDialog.cleanup()
         self.nameEntry['focus'] = 1
+        if AndroidKeyboard.available():
+            self.__askAndroidName()
         self.typeANameButton.show()
         self.acceptOnce('next', self.__handleDone)
 
@@ -749,6 +756,12 @@ class NameShop(StateData.StateData):
         self.typeANameButton.wrtReparentTo(aspect2d, sort=2)
         self.nameEntry.set('')
         self.nameEntry['focus'] = 1
+        if AndroidKeyboard.available():
+            self.nameEntry.bind(DGG.B1PRESS, self.__askAndroidName)
+            self.__askAndroidName()
+
+    def __askAndroidName(self, *args):
+        AndroidKeyboard.start(self.nameEntry, 0, onSend=self.__typedAName)
 
     def __typeAName(self):
         if base.cr.productName in ['JP',
@@ -771,6 +784,7 @@ class NameShop(StateData.StateData):
 
     def __typedAName(self, *args):
         self.notify.debug('__typedAName')
+        AndroidKeyboard.stop()
         self.nameEntry['focus'] = 0
         name = self.nameEntry.get()
         #name = TextEncoder().decodeText(name)
@@ -784,6 +798,9 @@ class NameShop(StateData.StateData):
         self.checkNameTyped(justCheck=True)
 
     def exitTypeANameState(self):
+        AndroidKeyboard.stop()
+        if AndroidKeyboard.available():
+            self.nameEntry.unbind(DGG.B1PRESS)
         self.typeANameButton.wrtReparentTo(self.namePanel, sort=2)
         self.uberhide(self.typeANameGUIElements)
 
@@ -927,8 +944,12 @@ class NameShop(StateData.StateData):
             self.rejectName(TTLocalizer.NameError)
         if avId == 0:
             if status == 1:
-                self.notify.debug('name check pending')
-                self.fsm.request('Approval')
+                # Offline a typed name is accepted at once, so there is no
+                # Toon Council message to read first.
+                self.notify.debug('name check passed')
+                # (So making the toon goes ahead, not round this check again.)
+                self.typedNameAccepted = self.nameEntry.get()
+                self.approvalAction(1)
             elif status == 0:
                 self.notify.debug('name check rejected')
                 self.fsm.request('TypeAName')
@@ -940,8 +961,10 @@ class NameShop(StateData.StateData):
             if status == 1:
                 style = self.toon.getStyle()
                 avDNA = style.makeNetString()
-                self.names[1] = self.nameEntry.get()
-                self.notify.debug('typed name needs approval')
+                self.names[0] = self.nameEntry.get()
+                self.names[1] = ''
+                self.toon.setName(self.names[0])
+                self.notify.debug('typed name accepted')
                 newPotAv = PotentialAvatar.PotentialAvatar(avId, self.names, avDNA, self.index, 1)
                 if not self.newwarp:
                     self.avList.append(newPotAv)
@@ -958,6 +981,7 @@ class NameShop(StateData.StateData):
         self.newDNA = style.makeNetString()
         self.requestingSkipTutorial = skipTutorial
         if not self.avExists or self.avExists and self.avId == 'deleteMe':
+            NewToonAccessories.choose(self.index, self.toon.getHat(), self.toon.getGlasses(), self.toon.getBackpack(), self.toon.getShoes())
             base.cr.csm.sendCreateAvatar(style, '', self.index)
             self.accept('nameShopCreateAvatarDone', self.handleCreateAvatarResponse)
         else:
@@ -1011,7 +1035,9 @@ class NameShop(StateData.StateData):
         base.cr.skipTutorialRequest = self.requestingSkipTutorial
 
     def __isFirstTime(self):
-        if not self.makeAToon.nameList or self.makeAToon.warp:
+        # Every new toon is asked, the first one too (it used to go
+        # straight into the Toontorial when the account had no toons yet).
+        if self.makeAToon.warp:
             self.__createAvatar()
         else:
             self.promptTutorial()

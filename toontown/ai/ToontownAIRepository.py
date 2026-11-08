@@ -89,6 +89,7 @@ class ToontownAIRepository(ToontownInternalRepository):
 
         self.useAllMinigames = self.config.ConfigVariableBool('want-all-minigames', False).getValue()
         self.doLiveUpdates = self.config.ConfigVariableBool('want-live-updates', True).getValue()
+        self.wantCogdominiums = self.config.ConfigVariableBool('want-cogdominiums', True).getValue()
 
         self.holidayManager = HolidayManagerAI(self)
 
@@ -134,15 +135,38 @@ class ToontownAIRepository(ToontownInternalRepository):
         self.statusSender.start()
 
         self.distributedDistrict.b_setAvailable(1)
+        self.districtReady = True
         self.notify.info('District is now ready.')
 
     def incrementPopulation(self):
-        self.districtStats.b_setAvatarCount(self.districtStats.getAvatarCount() + 1)
-        self.statusSender.sendStatus()
+        self.updatePopulation()
 
     def decrementPopulation(self):
-        self.districtStats.b_setAvatarCount(self.districtStats.getAvatarCount() - 1)
-        self.statusSender.sendStatus()
+        self.updatePopulation()
+
+    def countToons(self):
+        # The district's population is every toon in it: the player and
+        # the NPC toons playing alongside (Arthur: "you plus any NPC toon").
+        # Only the players were counted, so the Districts page said 1.
+        from toontown.toon.DistributedToonAI import DistributedToonAI
+        from toontown.toon.DistributedNPCToonBaseAI import DistributedNPCToonBaseAI
+        count = 0
+        for do in list(self.doId2do.values()):
+            if not isinstance(do, DistributedToonAI) or isinstance(do, DistributedNPCToonBaseAI):
+                continue
+            if do.isPlayerControlled() or getattr(do, 'isNPCPlayer', lambda: False)():
+                if not getattr(do, 'isDisabled', lambda: False)():
+                    count += 1
+        return count
+
+    def updatePopulation(self, task=None):
+        if not getattr(self, 'districtStats', None):
+            return task.again if task else None
+        count = self.countToons()
+        if count != self.districtStats.getAvatarCount():
+            self.districtStats.b_setAvatarCount(count)
+            self.statusSender.sendStatus()
+        return task.again if task else None
 
     def allocateZone(self, owner=None):
         zoneId = self.zoneAllocator.allocate()
@@ -169,12 +193,22 @@ class ToontownAIRepository(ToontownInternalRepository):
         self.districtStats.settoontownDistrictId(self.districtId)
         self.districtStats.generateWithRequiredAndId(self.allocateChannel(),
                                                      self.getGameDoId(), 3)
+        taskMgr.doMethodLater(5, self.updatePopulation, 'district-population-%d' % self.districtId)
 
         self.timeManager = TimeManagerAI(self)
         self.timeManager.generateWithRequired(2)
 
         self.newsManager = NewsManagerAI(self)
         self.newsManager.generateWithRequired(2)
+
+        from toontown.ai.ScavengerHuntMgrAI import ScavengerHuntMgrAI
+        self.scavengerHuntMgr = ScavengerHuntMgrAI(self)
+
+        from toontown.ai.DialogueManagerAI import DialogueManagerAI
+        self.dialogueManager = DialogueManagerAI(self)
+
+        from toontown.ai.PhasedHolidayMgrAI import PhasedHolidayMgrAI
+        self.phasedHolidayMgr = PhasedHolidayMgrAI(self)
 
         self.magicWordManager = MagicWordManagerAI(self)
         self.magicWordManager.generateWithRequired(2)
@@ -192,11 +226,19 @@ class ToontownAIRepository(ToontownInternalRepository):
         self.estateManager = EstateManagerAI(self)
         self.estateManager.generateWithRequired(2)
 
+        if simbase.wantPets:
+            from toontown.pets.PetManagerAI import PetManagerAI
+            self.petMgr = PetManagerAI(self)
+
         self.trophyMgr = DistributedTrophyMgrAI(self)
         self.trophyMgr.generateWithRequired(2)
 
         self.tutorialManager = TutorialManagerAI(self)
         self.tutorialManager.generateWithRequired(2)
+
+        from toontown.coderedemption.TTCodeRedemptionMgrAI import TTCodeRedemptionMgrAI
+        self.codeRedemptionMgr = TTCodeRedemptionMgrAI(self)
+        self.codeRedemptionMgr.generateWithRequired(2)
 
         self.catalogManager = CatalogManagerAI(self)
         self.catalogManager.generateWithRequired(2)
@@ -206,6 +248,7 @@ class ToontownAIRepository(ToontownInternalRepository):
             '''So the TCP window doesn't fill up and we get the axe'''
             while self.readerPollOnce():
                 pass
+            self.keepGameAnswering()
 
         self.hoods.append(TTHoodAI.TTHoodAI(self))
         clearQueue()
@@ -249,6 +292,10 @@ class ToontownAIRepository(ToontownInternalRepository):
         for sp in list(self.suitPlanners.values()):
             sp.assignInitialSuitBuildings()
 
+        if config.ConfigVariableBool('want-npc-players', True).getValue():
+            from toontown.npcplayers.NPCPlayerManagerAI import NPCPlayerManagerAI
+            self.npcPlayerManager = NPCPlayerManagerAI(self)
+
     def genDNAFileName(self, zoneId):
         zoneId = ZoneUtil.getCanonicalZoneId(zoneId)
         hoodId = ZoneUtil.getCanonicalHoodId(zoneId)
@@ -262,10 +309,30 @@ class ToontownAIRepository(ToontownInternalRepository):
         return 'phase_%s/dna/%s_%s.xml' % (phase, hood, zoneId)
 
     def loadDNA(self, filename):
+        self.keepGameAnswering()
         with open('/' + filename) as f:
             tree = DNAParser.parse(f)
 
         return tree
+
+    def keepGameAnswering(self):
+        # Offline, the AI starts up inside the game, and building every zone
+        # takes most of a minute on a phone. A frame now and then keeps the
+        # game's window answering; Android closes an app that stops.
+        from otp.local.ExecutionContext import getClientBuiltin
+        if getattr(self, 'districtReady', False):
+            return
+        # The launcher's loading bar counts the zones built.
+        from toontown.toonbase import OfflineLauncher
+        OfflineLauncher.townStep()
+        now = time.monotonic()
+        if now - getattr(self, 'lastGameFrame', 0) < 0.5:
+            return
+        self.lastGameFrame = now
+        base = getClientBuiltin('base')
+        engine = getattr(base, 'graphicsEngine', None) if base is not None else None
+        if engine is not None:
+            engine.renderFrame()
 
 
 @magicWord(category=CATEGORY_SYSADMIN, types=[str, int])

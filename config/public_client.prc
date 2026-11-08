@@ -4,7 +4,7 @@
 
 # Client settings
 window-title Toontown Rewritten [PRIVATE]
-server-version ttroff-beta-v2.12.2
+server-version TT-OFFEXP-1.0
 sync-video #f
 want-dev #f
 preload-avatars #t
@@ -19,7 +19,7 @@ tt-framerate #t
 want-new-ttrloader #t
 want-new-toonhall #t
 want-max-font #t
-want-smooth-animations #f
+want-smooth-animations #t
 
 
 # Resource settings

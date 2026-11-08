@@ -99,13 +99,15 @@ class DistributedToonHallInterior(DistributedToonInterior):
         try:
             gotoPhase = 'Phase' + str(newPhase)
             if self.sillyFSM.hasStateNamed(gotoPhase) and not self.sillyFSM.getCurrentState() == self.sillyFSM.getStateNamed(gotoPhase):
-                self.sillyFSM.request(gotoPhase)
+                # Forced: a new month takes the meter from phase 15 back to
+                # 0, which the phase states do not list as a way out.
+                self.sillyFSM.request(gotoPhase, force=1)
         except:
             self.notify.warning('Illegal phase transition requested %s' % newPhase)
 
     def startIfNeeded(self):
         try:
-            self.curPhase = self.getPhaseTorun()
+            self.curPhase = self.getPhaseToRun()
             if self.curPhase >= 0:
                 self.sillyFSM.request('Phase' + str(self.curPhase))
             else:

@@ -1,5 +1,5 @@
 from panda3d.core import NodePath, Point3, PlaneNode
-from direct.showbase.ShowBase import Plane
+from panda3d.core import Plane
 from direct.showbase.RandomNumGen import RandomNumGen
 from direct.interval.MetaInterval import Sequence, Parallel
 from direct.interval.FunctionInterval import Func, Wait
@@ -32,11 +32,13 @@ class CogdoMazeGameIntro(CogdoGameMovie):
             self.cogHead.reparentTo(hidden)
             self._toonDialogueSfx.play()
             self.toonHead.setClipPlane(self.clipPlane)
+            CogdoUtil.clipToBox(self.toonHead)
         else:
             self.toonHead.reparentTo(hidden)
             self.cogHead.reparentTo(aspect2d)
             self._cogDialogueSfx.play()
             self.cogHead.setClipPlane(self.clipPlane)
+            CogdoUtil.clipToBox(self.cogHead)
 
     def makeSuit(self, suitType):
         suit = Suit.Suit()
@@ -190,6 +192,15 @@ class CogdoMazeGameFinish(CogdoGameMovie):
             loseSfx = base.cogdoGameAudioMgr.createSfx('lose')
             self._ival.append(Sequence(Func(loseSfx.play), Func(self._localPlayer.toon.setAnimState, 'Sad')))
         self._ival.append(Sequence(Wait(Globals.FinishDurationSeconds - 1.0), Func(base.transitions.irisOut), Wait(1.0)))
+
+    def end(self):
+        # The game can end before this movie does (the next floor's
+        # elevator already showing). Finishing it then would run its iris
+        # out over the elevator and leave the screen black, so it just stops.
+        if self._ival is not None and self._ival.isPlaying():
+            self._ival.pause()
+        elif self._ival is not None:
+            self._ival.finish()
 
     def unload(self):
         CogdoGameMovie.unload(self)

@@ -33,6 +33,8 @@ INCOMPLETE_WRONG_NPC = 4
 COMPLETE = 5
 LEAVING = 6
 Any = 1
+# Departments whose cog buildings can be field offices (DistributedSuitPlannerAI.CogdoTracks).
+FieldOfficeTracks = ('s', 'l')
 OBSOLETE = 'OBSOLETE'
 Start = 1
 Cont = 0
@@ -1042,6 +1044,17 @@ class BuildingQuest(CogQuest):
             return TTLocalizer.QuestsBuildingQuestProgressString % {'progress': questDesc[4],
              'num': self.getNumBuildings()}
 
+    def hasFieldOffices(self):
+        # The departments whose buildings can be field offices: a field
+        # office counts for these tasks too.
+        track = self.getBuildingTrack()
+        return track == Any or track in FieldOfficeTracks
+
+    def buildingText(self, name):
+        if self.hasFieldOffices():
+            return getattr(TTLocalizer, name + 'FO', getattr(TTLocalizer, name))
+        return getattr(TTLocalizer, name)
+
     def getObjectiveStrings(self):
         count = self.getNumBuildings()
         floors = TTLocalizer.QuestsBuildingQuestFloorNumbers[self.getNumFloors() - 1]
@@ -1052,13 +1065,13 @@ class BuildingQuest(CogQuest):
             type = self.trackNames[self.trackCodes.index(buildingTrack)]
         if count == 1:
             if floors == '':
-                text = TTLocalizer.QuestsBuildingQuestDesc
+                text = self.buildingText('QuestsBuildingQuestDesc')
             else:
-                text = TTLocalizer.QuestsBuildingQuestDescF
+                text = self.buildingText('QuestsBuildingQuestDescF')
         elif floors == '':
-            text = TTLocalizer.QuestsBuildingQuestDescC
+            text = self.buildingText('QuestsBuildingQuestDescC')
         else:
-            text = TTLocalizer.QuestsBuildingQuestDescCF
+            text = self.buildingText('QuestsBuildingQuestDescCF')
         return (text % {'count': count,
           'floors': floors,
           'type': type},)
@@ -1078,13 +1091,13 @@ class BuildingQuest(CogQuest):
             type = self.trackNames[self.trackCodes.index(buildingTrack)]
         if count == 1:
             if floors == '':
-                text = TTLocalizer.QuestsBuildingQuestDesc
+                text = self.buildingText('QuestsBuildingQuestDesc')
             else:
-                text = TTLocalizer.QuestsBuildingQuestDescF
+                text = self.buildingText('QuestsBuildingQuestDescF')
         elif floors == '':
-            text = TTLocalizer.QuestsBuildingQuestDescI
+            text = self.buildingText('QuestsBuildingQuestDescI')
         else:
-            text = TTLocalizer.QuestsBuildingQuestDescIF
+            text = self.buildingText('QuestsBuildingQuestDescIF')
         objective = text % {'floors': floors,
          'type': type}
         location = self.getLocationName()
@@ -1216,7 +1229,7 @@ class FactoryNewbieQuest(FactoryQuest, NewbieQuest):
         if FactoryQuest.doesFactoryCount(self, avId, location, avList):
             return self.getNumNewbies(avId, avList)
         else:
-            return num
+            return 0
 
 
 class MintQuest(LocationBasedQuest):
@@ -1292,7 +1305,7 @@ class MintNewbieQuest(MintQuest, NewbieQuest):
         if MintQuest.doesMintCount(self, avId, location, avList):
             return self.getNumNewbies(avId, avList)
         else:
-            return num
+            return 0
 
 
 class CogPartQuest(LocationBasedQuest):
@@ -1369,7 +1382,7 @@ class CogPartNewbieQuest(CogPartQuest, NewbieQuest):
         if CogPartQuest.doesCogPartCount(self, avId, location, avList):
             return self.getNumNewbies(avId, avList)
         else:
-            return num
+            return 0
 
 
 class DeliverGagQuest(Quest):
@@ -18046,6 +18059,33 @@ def chooseBestQuests(tier, currentNpc, av):
 
 def questExists(id):
     return id in QuestDict
+
+
+def tracksOfferedTo(toon):
+    """The gag tracks the quest line has put in front of this toon so far:
+    both options of every track choice quest it has finished, plus the
+    tracks it already has. A toon can only swap into one of these."""
+    offered = set()
+    try:
+        access = toon.getTrackAccess()
+    except Exception:
+        access = []
+    for track, has in enumerate(access):
+        if has:
+            offered.add(track)
+    try:
+        history = list(toon.getQuestHistory())
+    except Exception:
+        history = []
+    for questId in history:
+        questEntry = QuestDict.get(questId)
+        if not questEntry:
+            continue
+        questDesc = questEntry[QuestDictDescIndex]
+        if questDesc[0] is TrackChoiceQuest:
+            offered.add(questDesc[1])
+            offered.add(questDesc[2])
+    return offered
 
 
 def getQuest(id):

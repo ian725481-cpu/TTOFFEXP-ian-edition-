@@ -4,6 +4,21 @@ from direct.directnotify import DirectNotifyGlobal
 from direct.fsm import StateData
 from direct.fsm import ClassicFSM, State
 from direct.fsm import State
+from direct.showbase.InputStateGlobal import inputState
+from otp.otpbase import OTPGlobals
+
+# How much faster a sprint is than walking, and how quickly the second press
+# of forward must follow the first.
+# Arthur asked for a slightly slower sprint (it was 1.5).
+SprintFactor = 1.35
+SprintDoubleTap = 0.3
+# A double tap is two short taps: a press of forward held longer than this
+# was walking, and stopping then going again straight after must not sprint
+# (Arthur: "you'll still be running instead of going into walking").
+SprintTapHold = 0.25
+# How long a sprinting toon can stand still before it goes back to walking.
+SprintStopStill = 0.0
+SprintStartGrace = 1.5
 
 class Walk(StateData.StateData):
     notify = DirectNotifyGlobal.directNotify.newCategory('Walk')
@@ -60,27 +75,134 @@ class Walk(StateData.StateData):
 
     def enterWalking(self):
         if base.localAvatar.hp > 0:
-            base.camLens.setMinFov(52.0/(4./3.))
+            from toontown.toonbase import ToontownGlobals
+            # The player's field of view (Shticker Book > Settings).
+            base.camLens.setMinFov(ToontownGlobals.DefaultCameraFov/(4./3.))
             base.localAvatar.startTrackAnimToSpeed()
             base.localAvatar.setWalkSpeedNormal()
-            #self.acceptOnce('control-w', self.enterSprinting)
-            #self.acceptOnce('lcontrol', self.enterSprinting)
+            # Two quick presses of forward, or the left stick pushed in on a
+            # controller, sprint.
+            self.lastForwardPress = None
+            self.lastForwardRelease = None
+            self.lastTapShort = False
+            for key in self.getForwardKeys():
+                self.accept(key, self.__forwardPressed)
+                self.accept(key + '-up', self.__forwardReleased)
+            self.accept('running-on', self.__startSprint)
         else:
             self.fsm.request('slowWalking')
 
+    def getForwardKeys(self):
+        # The arrow (the controller's stick presses it too) and the
+        # player's own forward key. The keymap's MOVE_UP was never set, so
+        # W (want-WASD's forward) never counted and a double tap of W did
+        # not sprint.
+        from toontown.toonbase import KeyBindings
+        return KeyBindings.forwardKeys()
+
+    def __forwardPressed(self):
+        # The touch joystick (and a controller's stick) presses the arrow
+        # and W together: one push, one press. Counted as two, every push
+        # of the stick was a double tap and started a sprint (Arthur: "you
+        # still run forever").
+        frame = globalClock.getFrameCount()
+        if frame == getattr(self, 'lastForwardFrame', None):
+            return
+        self.lastForwardFrame = frame
+        now = globalClock.getFrameTime()
+        # A controller runs with its run button (L3) only: letting go of the
+        # stick and pushing it again was taken for a double tap, so the toon
+        # sprinted again after every quick stop.
+        from toontown.toonbase import Gamepad
+        if Gamepad.isActive():
+            self.lastForwardPress = None
+            return
+        # Only a short tap, let go of and pressed again quickly, sprints.
+        release = getattr(self, 'lastForwardRelease', None)
+        if (getattr(self, 'lastTapShort', False) and release is not None
+                and now - release <= SprintDoubleTap):
+            self.lastForwardPress = None
+            self.lastTapShort = False
+            self.__startSprint(byKey=True)
+        else:
+            self.lastForwardPress = now
+
+    def __forwardReleased(self):
+        frame = globalClock.getFrameCount()
+        if frame == getattr(self, 'lastReleaseFrame', None):
+            return
+        self.lastReleaseFrame = frame
+        now = globalClock.getFrameTime()
+        press = getattr(self, 'lastForwardPress', None)
+        self.lastTapShort = press is not None and now - press <= SprintTapHold
+        self.lastForwardRelease = now
+
+    def __startSprint(self, byKey=False):
+        # A double tap sprints while forward is held; the controller's run
+        # button sprints until it is pressed again.
+        self.sprintByKey = byKey
+        if self.fsm.getCurrentState().getName() == 'walking':
+            self.fsm.request('sprinting')
+
     def enterSprinting(self):
         if base.localAvatar.hp > 0:
-            fov = base.camLens.setMinFov(60.0/(4./3.))
             base.localAvatar.startTrackAnimToSpeed()
-            base.localAvatar.setSprintSpeedNormal()
-            self.acceptOnce('w', self.enterWalking)
-            self.acceptOnce('lcontrol-up', self.enterWalking)
+            base.localAvatar.controlManager.setSpeeds(OTPGlobals.ToonForwardSpeed * SprintFactor, OTPGlobals.ToonJumpForce,
+                                                      OTPGlobals.ToonReverseSpeed, OTPGlobals.ToonRotateSpeed)
+            self.accept('running-off', self.__stopSprint)
+            self.stillSince = None
+            self.sprintMoved = False
+            # Letting go of forward (or the stick) stops the sprint.
+            taskMgr.add(self.__watchSprint, 'walkSprintWatch')
+        else:
+            self.fsm.request('slowWalking')
+
+    def __watchSprint(self, task):
+        # Standing still ends a sprint, however it was started (the double
+        # tap or the controller's run button): moving again walks until run
+        # is pressed again.
+        if self.__moving():
+            self.stillSince = None
+            self.sprintMoved = True
+            return task.cont
+        now = globalClock.getFrameTime()
+        if getattr(self, 'stillSince', None) is None:
+            self.stillSince = now
+        # Run pressed while standing gets a moment to start moving.
+        wait = SprintStopStill if getattr(self, 'sprintMoved', False) else SprintStartGrace
+        if getattr(self, 'sprintByKey', False) or now - self.stillSince >= wait:
+            self.__stopSprint()
+            return task.done
+        return task.cont
+
+    @staticmethod
+    def __moving():
+        if inputState.isSet('forward'):
+            return True
+        controls = getattr(base.localAvatar.controlManager, 'currentControls', None)
+        # Backing up is not running: pulling the stick back to stop kept
+        # the sprint going.
+        speed = getattr(controls, 'speed', 0.0) or 0.0
+        slide = abs(getattr(controls, 'slideSpeed', 0.0) or 0.0)
+        return speed > 0.1 or slide > 0.1
+
+    def __stopSprint(self):
+        if self.fsm.getCurrentState().getName() == 'sprinting':
+            self.fsm.request('walking')
 
     def exitSprinting(self):
+        taskMgr.remove('walkSprintWatch')
+        self.ignore('running-off')
+        # The controller's run button goes back to off too.
+        messenger.send('sprint-stopped')
         base.localAvatar.startTrackAnimToSpeed()
         base.localAvatar.setWalkSpeedNormal()
 
     def exitWalking(self):
+        for key in self.getForwardKeys():
+            self.ignore(key)
+            self.ignore(key + '-up')
+        self.ignore('running-on')
         base.localAvatar.stopTrackAnimToSpeed()
         base.localAvatar.setWalkSpeedNormal()
 

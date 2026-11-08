@@ -20,9 +20,13 @@ from otp.avatar import Emote
 from toontown.hood import ZoneUtil
 from direct.task import Task
 FO_DICT = {'s': 'tt_m_ara_cbe_fieldOfficeMoverShaker',
- 'l': 'tt_m_ara_cbe_fieldOfficeMoverShaker',
+ 'l': 'tt_m_ara_cbe_fieldOfficeLegalEagle',
  'm': 'tt_m_ara_cbe_fieldOfficeMoverShaker',
  'c': 'tt_m_ara_cbe_fieldOfficeMoverShaker'}
+
+def isToonFlat(name):
+    return name[0] == 't' and name.find('_landmark_') == -1
+
 
 class DistributedBuilding(DistributedObject.DistributedObject):
     SUIT_INIT_HEIGHT = 125
@@ -306,7 +310,8 @@ class DistributedBuilding(DistributedObject.DistributedObject):
          None]
         self.elevatorNodePath = hidden.attachNewNode('elevatorNodePath')
         if cogdo:
-            self.elevatorModel = loader.loadModel('phase_5/models/cogdominium/tt_m_ara_csa_elevatorB')
+            from toontown.cogdominium import CogdoUtil
+            self.elevatorModel = CogdoUtil.loadElevatorModel()
         else:
             self.elevatorModel = loader.loadModel('phase_4/models/modules/elevator')
             npc = self.elevatorModel.findAllMatches('**/floor_light_?;+s')
@@ -526,6 +531,11 @@ class DistributedBuilding(DistributedObject.DistributedObject):
                 tracks.append(showTrack)
                 if not soundPlayed:
                     soundPlayed = 1
+            elif isToonFlat(name):
+                # A field office has no flats of its own to take the place
+                # of the block's, so those stay (darkened) rather than
+                # leaving a hole in the street.
+                continue
             elif name[0] == 't':
                 hideTrack = Sequence(name=self.taskName('ToCogdoToonFlatsTrack'))
                 timeTillSquish = (self.SUIT_INIT_HEIGHT - 20.0) / self.SUIT_INIT_HEIGHT
@@ -544,14 +554,16 @@ class DistributedBuilding(DistributedObject.DistributedObject):
         return
 
     def setupCogdo(self, nodePath):
+        dnaData = base.cr.playGame.dnaData
         dnaStore = self.cr.playGame.dnaStore
         level = int(self.difficulty / 2) + 1
-        suitNP = dnaStore.findNode(FO_DICT[chr(self.track)])
-        zoneId = dnaStore.getZoneFromBlockNumber(self.block)
+        # The field office models are not in the street storage DNA.
+        suitNP = loader.loadModel('phase_5/models/cogdominium/%s' % FO_DICT[chr(self.track)])
+        zoneId = dnaData.getBlock(self.block).zone
         zoneId = ZoneUtil.getTrueZoneId(zoneId, self.interiorZoneId)
         newParentNP = base.cr.playGame.hood.loader.zoneDict[zoneId]
         suitBuildingNP = suitNP.copyTo(newParentNP)
-        buildingTitle = dnaStore.getTitleFromBlockNumber(self.block)
+        buildingTitle = dnaData.getBlock(self.block).title
         if not buildingTitle:
             buildingTitle = TTLocalizer.Cogdominiums
         else:
@@ -574,14 +586,31 @@ class DistributedBuilding(DistributedObject.DistributedObject):
         signTextNodePath.setPosHprScale(0.0, 0.0, -0.13 + textHeight * 0.1 / zScale, 0.0, 0.0, 0.0, 0.1 * 8.0 / 20.0, 0.1, 0.1 / zScale)
         signTextNodePath.setColor(1.0, 1.0, 1.0, 1.0)
         frontNP = suitBuildingNP.find('**/*_front/+GeomNode;+s')
+        if frontNP.isEmpty():
+            # In the Lawbot field office the front is the geometry itself.
+            frontNP = suitBuildingNP.find('**/*_front;+s')
         backgroundNP.wrtReparentTo(frontNP)
         frontNP.node().setEffect(DecalEffect.make())
         suitBuildingNP.setName('cb' + str(self.block) + ':_landmark__DNARoot')
         suitBuildingNP.setPosHprScale(nodePath, 15.463, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+        if chr(self.track) == 'm':
+            self.retextureCashbotFieldOffice(suitBuildingNP)
         suitBuildingNP.flattenMedium()
         suitBuildingNP.setColorScale(0.6, 0.6, 0.6, 1.0)
         self.loadElevator(suitBuildingNP, cogdo=True)
         return suitBuildingNP
+
+    # A Cashbot field office shares the Mover & Shaker building: it gets
+    # Arthur's green Loan Shark poster and trim in place of the Sellbot ones.
+    CashbotFieldOfficeTextures = {'cogdominium_palette_3cmla_4': 'phase_5/maps/ttoff_cogdominium_palette_cashbot_4.jpg',
+                                  'cogdominium_palette_3cmla_5': 'phase_5/maps/ttoff_cogdominium_palette_cashbot_5.jpg'}
+
+    def retextureCashbotFieldOffice(self, np):
+        for name, path in self.CashbotFieldOfficeTextures.items():
+            old = np.findTexture(name)
+            new = loader.loadTexture(path)
+            if old and new:
+                np.replaceTexture(old, new)
 
     def animToToon(self, timeStamp):
         self.stopTransition()
@@ -679,6 +708,8 @@ class DistributedBuilding(DistributedObject.DistributedObject):
                 if not suitSoundPlayed:
                     suitSoundPlayed = 1
                 tracks.append(hideTrack)
+            elif isToonFlat(name):
+                i.unstash()
             elif name[0] == 't':
                 hideTrack = Sequence(name=self.taskName('ToToonFromCogdoFlatsTrack'))
                 hideTrack.append(Wait(TO_TOON_BLDG_TIME * 0.5))
@@ -889,7 +920,8 @@ class DistributedBuilding(DistributedObject.DistributedObject):
                 if name.find('_landmark_') != -1:
                     i.stash()
                 else:
-                    i.stash()
+                    # The block's toon flats stay; see animToCogdo.
+                    i.unstash()
             elif name[0] == 's':
                 if name.find('_landmark_') != -1:
                     i.removeNode()

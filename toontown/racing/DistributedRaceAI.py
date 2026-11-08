@@ -5,6 +5,7 @@ from toontown.racing.DistributedGagAI import DistributedGagAI
 from toontown.racing import RaceGlobals
 from direct.distributed.ClockDelta import *
 from toontown.toonbase import TTLocalizer
+from toontown.toonbase import ToontownGlobals
 from direct.fsm.FSM import FSM
 from direct.task import Task
 
@@ -32,6 +33,19 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
         self.livingGags = []
         self.currentlyAffectedByAnvil = {}
         self.avatarProgress = {}
+        # When each racer last had a pie thrown at them.
+        self.pieTargets = {}
+        # A Grand Prix (circuit): the points each racer got in each race so
+        # far, their time over all the races, the races they qualified in
+        # and won, and the entry fee paid at the pad.
+        self.circuitPoints = {}
+        self.circuitTimes = {}
+        self.circuitQualified = {}
+        self.circuitWins = {}
+        self.circuitFee = 0
+        self.circuitStarters = 0
+        self.circuitDone = False
+        self.nextRace = None
     
     def generate(self):
         for avatar in self.avatars:
@@ -244,15 +258,18 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
         if self.raceType == RaceGlobals.Practice:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon tried to gain gag in a practice race!')
             return
-        places = sorted(self.avatarProgress, key=self.avatarProgress.get)
+        # First place is GagFreq[0].
+        places = sorted(self.avatarProgress, key=self.avatarProgress.get, reverse=True)
         avPlace = places.index(avId)
         gag = self.gags[slot]
         if not gag[0]:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon tried to pick up a gag that doesn\'t exist!')
             return
         gagIndex = gag[1]
-        realGag = RaceGlobals.GagFreq[avPlace][gagIndex]
-        if realGag != requestedGag:
+        # A client's idea of its place can be a moment behind; any place
+        # around it will do.
+        nearby = [RaceGlobals.GagFreq[place][gagIndex] for place in range(max(avPlace - 1, 0), min(avPlace + 2, len(places)))]
+        if requestedGag not in nearby:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon tried to get the wrong gag!')
             return
         self.gags[slot] = [0, 0]
@@ -271,7 +288,13 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
         if not avId in self.avatars:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon tried to leave race they\'re not in!')
             return
+        if self.raceType == RaceGlobals.Circuit and self.circuitLoop and self.circuitDone \
+                and avId in self.finishedAvatars:
+            # On to the next race of the Grand Prix.
+            self.goToNextRace(avId)
         self.avatars.remove(avId)
+        if self.raceType == RaceGlobals.Circuit and not self.circuitDone:
+            self.checkCircuitDone()
         if set(self.finishedAvatars) == set(self.avatars) or len(self.avatars) == 0:
             self.requestDelete()
 
@@ -299,6 +322,9 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
 
         av = self.air.doId2do.get(avId)
         place = len(self.finishedAvatars)
+        if self.raceType == RaceGlobals.Circuit:
+            self.circuitRacerFinished(avId, place)
+            return
         entryFee = RaceGlobals.getEntryFee(self.trackId, self.raceType)
         bonus = 0
         totalTime = globalClockDelta.networkToLocalTime(globalClockDelta.getRealNetworkTime()) - self.startTime
@@ -315,12 +341,138 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
         else:
             winnings = 0
             trophies = []
+        if winnings > entryFee and self.air.holidayManager.isHolidayRunning(ToontownGlobals.KARTING_TICKETS_HOLIDAY):
+            # Twice the tickets won, on top of getting the entry fee back.
+            bonus = (winnings - entryFee) * (RaceGlobals.KARTING_TICKETS_HOLIDAY_MULTIPLIER - 1)
+            winnings += bonus
         av.b_setTickets(av.getTickets() + winnings)
         if av.getTickets() > RaceGlobals.MaxTickets:
             av.b_setTickets(RaceGlobals.MaxTickets)
-        self.sendUpdate('setPlace', [avId, totalTime, place, entryFee, qualify, (winnings-entryFee), bonus, trophies, [], 0])
+        # The end panel shows the entry fee back plus what was won. A racer
+        # who didn't qualify gets neither back (and the field can't hold
+        # less than nothing won).
+        shownFee = entryFee if winnings else 0
+        self.sendUpdate('setPlace', [avId, totalTime, place, shownFee, qualify, max(winnings - entryFee - bonus, 0), bonus, trophies, [], 0])
 
         
+    # --- Grand Prix (circuit races) ---
+
+    def circuitRacerFinished(self, avId, place):
+        # Each race of a Grand Prix gives points by place (10, 8, 6, 4 with
+        # four racers; fewer racers start lower down, as tickets do); the
+        # tickets and trophies come at the end of the last race.
+        totalTime = globalClockDelta.networkToLocalTime(globalClockDelta.getRealNetworkTime()) - self.startTime
+        starters = max(self.circuitStarters, len(self.avatarProgress), len(self.avatars))
+        offset = 4 - starters
+        points = RaceGlobals.CircuitPoints[min(place + offset - 1, len(RaceGlobals.CircuitPoints) - 1)]
+        self.circuitPoints.setdefault(avId, []).append(points)
+        self.circuitTimes[avId] = self.circuitTimes.get(avId, 0) + totalTime
+        if totalTime < RaceGlobals.getQualifyingTime(self.trackId):
+            self.circuitQualified[avId] = self.circuitQualified.get(avId, 0) + 1
+        if place == 1:
+            self.circuitWins[avId] = self.circuitWins.get(avId, 0) + 1
+        qualify = totalTime < RaceGlobals.getQualifyingTime(self.trackId)
+        self.sendUpdate('setPlace', [avId, totalTime, place, 0, qualify, 0, 0, [],
+                                     self.circuitPoints[avId], self.circuitTimes[avId]])
+        self.checkCircuitDone()
+
+    def checkCircuitDone(self):
+        if self.circuitDone or not self.finishedAvatars:
+            return
+        if not all(avId in self.finishedAvatars for avId in self.avatars):
+            return
+        self.circuitDone = True
+        if self.circuitLoop:
+            # Points shown; each racer's "Next Race" (or 30 seconds) takes
+            # them on.
+            self.sendUpdate('endCircuitRace', [])
+            return
+        self.endCircuit()
+
+    def circuitStandings(self):
+        racers = [avId for avId in self.finishedAvatars if avId in self.circuitPoints]
+        return sorted(racers, key=lambda avId: (-sum(self.circuitPoints[avId]), self.circuitTimes.get(avId, 0)))
+
+    def endCircuit(self):
+        races = len(self.circuitPoints and max(self.circuitPoints.values(), key=len))
+        standings = self.circuitStandings()
+        starters = max(self.circuitStarters, len(standings))
+        offset = 4 - starters
+        for index, avId in enumerate(standings):
+            place = index + 1
+            av = self.air.doId2do.get(avId)
+            if av is None:
+                continue
+            entryFee = self.circuitFee
+            winnings = int(entryFee * RaceGlobals.Winnings[min(place + offset - 1, len(RaceGlobals.Winnings) - 1)])
+            bonus = 0
+            if winnings > entryFee and self.air.holidayManager.isHolidayRunning(ToontownGlobals.KARTING_TICKETS_HOLIDAY):
+                bonus = (winnings - entryFee) * (RaceGlobals.KARTING_TICKETS_HOLIDAY_MULTIPLIER - 1)
+                winnings += bonus
+            av.b_setTickets(min(av.getTickets() + winnings, RaceGlobals.MaxTickets))
+            trophies = []
+            if hasattr(av, 'getKartingTrophies'):
+                trophies = self.calculateCircuitTrophies(av, place == 1, self.circuitWins.get(avId, 0) >= races,
+                                                         self.circuitQualified.get(avId, 0) >= races)
+            self.sendUpdate('setCircuitPlace', [avId, place, entryFee, max(winnings - entryFee - bonus, 0), bonus, trophies])
+        self.sendUpdate('endCircuitRace', [])
+
+    def calculateCircuitTrophies(self, av, won, swept, qualified):
+        history = list(av.getKartingHistory())
+        trophies = av.getKartingTrophies()
+        numTrophies = len([t for t in trophies[:RaceGlobals.NumTrophies] if t])
+        oldCups = numTrophies // 10
+        new = []
+        # kartingHistory[8..10]: Grand Prix wins, sweeps and qualifying runs.
+        for done, index, needed, trophyList in ((won, 8, RaceGlobals.WonCircuitRaces, RaceGlobals.CircuitWinsList),
+                                                (swept, 9, RaceGlobals.SweptCircuitRaces, RaceGlobals.CircuitSweepsList),
+                                                (qualified, 10, RaceGlobals.QualifiedCircuitRaces, RaceGlobals.CircuitQualList)):
+            if not done:
+                continue
+            history[index] = min(history[index] + 1, 255)
+            for count, trophy in zip(needed, trophyList):
+                if history[index] >= count and not trophies[trophy]:
+                    trophies[trophy] = 1
+                    new.append(trophy)
+        av.b_setKartingHistory(history)
+        newCups = (numTrophies + len(new)) // 10
+        for i in range(min(newCups, len(RaceGlobals.TrophyCups))):
+            if not trophies[RaceGlobals.TrophyCups[i]]:
+                trophies[RaceGlobals.TrophyCups[i]] = 1
+                new.append(RaceGlobals.TrophyCups[i])
+        if newCups > oldCups:
+            av.b_setMaxHp(av.getMaxHp() + newCups - oldCups)
+            av.toonUp(av.getMaxHp())
+        av.b_setKartingTrophies(trophies)
+        return new
+
+    def goToNextRace(self, avId):
+        # The next race of the loop, made when the first racer moves on;
+        # it takes everyone who finished this one. NPC racers follow the
+        # player there.
+        if self.nextRace is None or self.nextRace.isDeleted():
+            zoneId = self.air.allocateZone()
+            race = DistributedRaceAI(self.air)
+            race.setZoneId(zoneId)
+            race.setTrackId(self.circuitLoop[0])
+            race.setRaceType(RaceGlobals.Circuit)
+            race.setCircuitLoop(self.circuitLoop[1:])
+            racers = self.circuitStandings()
+            race.setAvatars(racers)
+            race.setStartingPlaces(list(range(len(racers))))
+            race.setLapCount(self.lapCount)
+            race.circuitFee = self.circuitFee
+            race.circuitStarters = max(self.circuitStarters, len(self.avatarProgress))
+            race.circuitPoints = dict((a, list(p)) for a, p in self.circuitPoints.items())
+            race.circuitTimes = dict(self.circuitTimes)
+            race.circuitQualified = dict(self.circuitQualified)
+            race.circuitWins = dict(self.circuitWins)
+            race.generateWithRequired(zoneId)
+            self.nextRace = race
+        race = self.nextRace
+        if avId in race.avatars:
+            self.sendUpdateToAvatarId(avId, 'setRaceZone', [race.zoneId, race.trackId])
+
     def calculateTrophies(self, avId, won, qualify, time):
         av = self.air.doId2do[avId]
         kartingHistory = av.getKartingHistory()
@@ -381,7 +533,8 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
         avId = self.air.getAvatarIdFromSender()
         if not avId in self.avatars:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon tried to throw a gag in a race they\'re not in!')
-        if self.avatarGags[avId] == RaceGlobals.BANANA:
+            return
+        if self.avatarGags.get(avId) == RaceGlobals.BANANA:
             gag = DistributedGagAI(self.air)
             gag.setRace(self.doId)
             gag.setOwnerId(avId)
@@ -395,13 +548,15 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
             pass
         elif self.avatarGags[avId] == RaceGlobals.ANVIL:
             places = sorted(self.avatarProgress, key=self.avatarProgress.get, reverse=True)
+            currAvatar = None
             for i in places:
                 if not i in self.finishedAvatars and not self.currentlyAffectedByAnvil[i]:
                     currAvatar = i
                     break
-            self.currentlyAffectedByAnvil[avId] = True
-            taskMgr.doMethodLater(RaceGlobals.AnvilSquishDuration, self.unsquish, 'unsquish-%i' % currAvatar, [currAvatar])
-            self.sendUpdate('dropAnvilOn', [avId, currAvatar, globalClockDelta.getRealNetworkTime()])
+            if currAvatar is not None:
+                self.currentlyAffectedByAnvil[currAvatar] = True
+                taskMgr.doMethodLater(RaceGlobals.AnvilSquishDuration, self.unsquish, 'unsquish-%i' % currAvatar, [currAvatar])
+                self.sendUpdate('dropAnvilOn', [avId, currAvatar, globalClockDelta.getRealNetworkTime()])
         elif self.avatarGags[avId] == RaceGlobals.PIE:
             places = sorted(self.avatarProgress, key=self.avatarProgress.get)
             avPlace = places.index(avId)
@@ -409,6 +564,7 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
                 target = 0
             else:
                 target = places[avPlace + 1]
+            self.pieTargets[target] = globalClock.getFrameTime()
             self.sendUpdate('shootPiejectile', [avId, target, 0])
         else:
             self.air.writeServerEvent('suspicious', avId=avId, issue='Toon use race gag while not having one!')
@@ -428,6 +584,8 @@ class DistributedRaceAI(DistributedObjectAI, FSM):
                 del self.avatarKarts[count]
                 break
             count += 1
+        if self.raceType == RaceGlobals.Circuit and not self.circuitDone:
+            self.checkCircuitDone()
         if len(self.avatars) == 0:
             self.requestDelete()
 

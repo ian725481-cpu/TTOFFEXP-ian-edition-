@@ -1,4 +1,4 @@
-from panda3d.core import ColorBlendAttrib
+from panda3d.core import ColorBlendAttrib, Point3, ScissorEffect
 ModelPhase = 5
 ModelTypes = {'animation': 'a',
  'model': 'm',
@@ -41,6 +41,17 @@ class DevVariableContainer:
         self.__dict__[name] = self._enabled and value
 
 
+def loadElevatorModel():
+    # The field office elevator's floor is 0.1 above its origin, so toons
+    # stepped up onto it. Lower the model so its floor is level with the
+    # ground and toons walk in flat.
+    model = loader.loadModel('phase_5/models/cogdominium/tt_m_ara_csa_elevatorB')
+    grp = model.find('**/Grp_elevatorB')
+    if not grp.isEmpty():
+        grp.setZ(grp.getZ() - 0.1)
+    return model
+
+
 def getRandomDialogueLine(lineList, rng):
     return lineList[rng.randint(0, len(lineList) - 1)]
 
@@ -70,7 +81,10 @@ class CogdoGameMovie:
 
     def unload(self):
         if self._ival != None and self._ival.isPlaying():
-            self.finish()
+            # Stopped where it is: there is no self.finish (that raised), and
+            # finishing the ival would run its last steps, such as the
+            # flying game's iris out, after the next floor has started.
+            self._ival.pause()
         self._ival = None
         self._dialogueLabel.removeNode()
         del self._dialogueLabel
@@ -141,3 +155,35 @@ def rotateTable(table, angle):
             t.append(row)
 
     return t
+
+
+# The tag on the entrance elevator while the toons ride up in it.
+RIDING_TAG = 'cogdoRidingElevator'
+
+
+def isRidingElevator(toon):
+    np = toon.getParent()
+    while not np.isEmpty():
+        if np.hasPythonTag(RIDING_TAG):
+            return True
+        np = np.getParent()
+    return False
+
+
+def takeToon(toon):
+    """Puts a toon in the game's world. The game can load while the toons
+    still ride up in the elevator (so its room is there when the doors
+    open); a riding toon stays in the elevator, which lets it out."""
+    if not isRidingElevator(toon):
+        toon.reparentTo(render)
+
+
+# The intro and dialogue movies cut the speaker's head off at the bottom
+# edge of the talk box with a clip plane. Phones (OpenGL ES 2) have no clip
+# planes, so the whole toon or cog showed outside the box. A scissor cut, in
+# screen space, does the same job everywhere.
+BOX_CLIP_Z = -1.27 + 2.45 * 0.18
+
+
+def clipToBox(node, z = BOX_CLIP_Z):
+    node.setEffect(ScissorEffect.makeNode(Point3(-10, 0, z), Point3(10, 0, 10), aspect2d))

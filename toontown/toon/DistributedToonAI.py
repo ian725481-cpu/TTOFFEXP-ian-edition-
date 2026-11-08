@@ -66,6 +66,13 @@ else:
 if simbase.wantKarts:
     from toontown.racing.KartDNA import *
 
+# Answers to requestTrackSwap (see trackSwapResult).
+TrackSwapOK = 0
+TrackSwapLocked = 1
+TrackSwapNotYet = 2
+TrackSwapBadTrack = 3
+
+
 class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoothNodeAI.DistributedSmoothNodeAI, PetLookerAI.PetLookerAI):
     notify = DirectNotifyGlobal.directNotify.newCategory('DistributedToonAI')
     maxCallsPerNPC = 100
@@ -170,6 +177,8 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
         self.houseId = 0
         self.posIndex = 0
         self.savedCheesyEffect = ToontownGlobals.CENormal
+        self.scavengerHuntGoals = []
+        self.cheesyEffectEnded = False
         self.savedCheesyHoodId = 0
         self.savedCheesyExpireTime = 0
         self.ghostMode = 0
@@ -221,6 +230,7 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
         self.inviteMailNotify = ToontownGlobals.NoItems
         self.invites = []
         self.hostedParties = []
+        self.hostedPartyRecord = []
         self.partiesInvitedTo = []
         self.partyReplyInfoBases = []
         self.modulelist = ModuleListAI.ModuleList()
@@ -242,6 +252,9 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
     def announceGenerate(self):
         DistributedPlayerAI.DistributedPlayerAI.announceGenerate(self)
         DistributedSmoothNodeAI.DistributedSmoothNodeAI.announceGenerate(self)
+        if self.cheesyEffectEnded:
+            # A holiday head from the database whose holiday is over.
+            self.d_setCheesyEffect(*self.getCheesyEffect())
         if self.isPlayerControlled():
             if self.WantOldGMNameBan:
                 self._checkOldGMName()
@@ -580,34 +593,8 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
             else:
                 allowedColors = ToonDNA.defaultGirlColorList
 
-            # No idea why this wasn't done by disney, but add sanity checks for black (and now white) toons.
-            if self.dna.getAnimal() == 'bear':
-                allowedColors = allowedColors + [0]
-            if self.dna.getAnimal() == 'cat':
-                allowedColors = allowedColors + [38]
-
-            if 38 in [self.dna.legColor, self.dna.armColor, self.dna.headColor]: # Disney ALSO didn't do this. Verify that a toon is fully black/white.
-                if self.dna.legColor != 38:
-                    self.dna.legColor = 38
-                    changed = True
-                if self.dna.armColor != 38:
-                    self.dna.armColor = 38
-                    changed = True
-                if self.dna.headColor != 38:
-                    self.dna.headColor = 38
-                    changed = True
-
-            elif 0 in [self.dna.legColor, self.dna.armColor, self.dna.headColor]:
-                if self.dna.legColor != 0:
-                    self.dna.legColor = 0
-                    changed = True
-                if self.dna.armColor != 0:
-                    self.dna.armColor = 0
-                    changed = True
-                if self.dna.headColor != 0:
-                    self.dna.headColor = 0
-                    changed = True
-
+            # Black and white are Make-A-Toon colours here, for any toon and
+            # any part of it (Arthur asked for them offline).
             if self.dna.legColor not in allowedColors:
                 self.dna.legColor = allowedColors[0]
                 changed = True
@@ -798,7 +785,8 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
         self.notify.debug('setting NPC friends dict to %s' % self.NPCFriendsDict)
 
     def getNPCFriendsDict(self):
-        return self.NPCFriendsDict
+        # In the form the field sends: (npcId, calls) pairs.
+        return list(self.NPCFriendsDict.items())
 
     def b_setNPCFriendsDict(self, NPCFriendsList):
         self.setNPCFriendsDict(NPCFriendsList)
@@ -1938,16 +1926,21 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
 
     def b_setCheesyEffect(self, effect, hoodId, expireTime):
         self.setCheesyEffect(effect, hoodId, expireTime)
-        self.d_setCheesyEffect(effect, hoodId, expireTime)
+        # setCheesyEffect may have turned down a holiday-only effect.
+        self.d_setCheesyEffect(*self.getCheesyEffect())
 
     def d_setCheesyEffect(self, effect, hoodId, expireTime):
         self.sendUpdate('setCheesyEffect', [effect, hoodId, expireTime])
 
     def setCheesyEffect(self, effect, hoodId, expireTime):
-        # We don't yet have a working holidayManager, and we want to keep snowman heads.
-        #if simbase.air.holidayManager and ToontownGlobals.WINTER_CAROLING not in simbase.air.holidayManager.currentHolidays and ToontownGlobals.WACKY_WINTER_CAROLING not in simbase.air.holidayManager.currentHolidays and effect == ToontownGlobals.CESnowMan:
-            #self.b_setCheesyEffect(ToontownGlobals.CENormal, hoodId, expireTime)
-            #return
+        # The Snowman and Pumpkin heads from the scavenger hunts last only
+        # while their holiday runs.
+        holidayManager = getattr(simbase.air, 'holidayManager', None)
+        if holidayManager:
+            if (effect == ToontownGlobals.CESnowMan and not holidayManager.isHolidayRunning(ToontownGlobals.WINTER_CAROLING, ToontownGlobals.WACKY_WINTER_CAROLING)) or \
+               (effect == ToontownGlobals.CEPumpkin and not holidayManager.isHolidayRunning(ToontownGlobals.TRICK_OR_TREAT, ToontownGlobals.SPOOKY_TRICK_OR_TREAT)):
+                effect, hoodId, expireTime = ToontownGlobals.CENormal, 0, 0
+                self.cheesyEffectEnded = not self.isGenerated()
         self.savedCheesyEffect = effect
         self.savedCheesyHoodId = hoodId
         self.savedCheesyExpireTime = expireTime
@@ -1961,6 +1954,36 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
                 else:
                     self.__undoCheesyEffect(None)
         return
+
+    def setScavengerHuntGoals(self, goals):
+        # The Trick-or-Treat and Winter Caroling shops this toon has found
+        # (see ScavengerHuntGlobals.encodeGoal).
+        self.scavengerHuntGoals = list(goals)
+
+    def d_setScavengerHuntGoals(self, goals):
+        self.sendUpdate('setScavengerHuntGoals', [goals])
+
+    def b_setScavengerHuntGoals(self, goals):
+        self.setScavengerHuntGoals(goals)
+        self.d_setScavengerHuntGoals(goals)
+
+    def getScavengerHuntGoals(self):
+        return self.scavengerHuntGoals
+
+    def setHostedPartyRecord(self, record):
+        # The party this toon planned, kept in the database until it is
+        # over (see DistributedPartyManagerAI).
+        self.hostedPartyRecord = [list(party) for party in record]
+
+    def d_setHostedPartyRecord(self, record):
+        self.sendUpdate('setHostedPartyRecord', [record])
+
+    def b_setHostedPartyRecord(self, record):
+        self.setHostedPartyRecord(record)
+        self.d_setHostedPartyRecord(record)
+
+    def getHostedPartyRecord(self):
+        return self.hostedPartyRecord
 
     def getCheesyEffect(self):
         return (self.savedCheesyEffect, self.savedCheesyHoodId, self.savedCheesyExpireTime)
@@ -2470,7 +2493,14 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
 
     def b_setBothSchedules(self, onOrder, onGiftOrder, doUpdateLater = True):
         self.setBothSchedules(onOrder, onGiftOrder, doUpdateLater)
-        self.d_setDeliverySchedule(onOrder)
+        self.d_setDeliverySchedule(self.onOrder)
+        self.d_setGiftSchedule(self.onGiftOrder)
+
+    def b_setGiftSchedule(self, onGiftOrder, doUpdateLater = True):
+        self.b_setBothSchedules(None, onGiftOrder, doUpdateLater)
+
+    def d_setGiftSchedule(self, onGiftOrder):
+        self.sendUpdate('setGiftSchedule', [onGiftOrder.getBlob(store=CatalogItem.Customization | CatalogItem.DeliveryDate)])
 
     def setBothSchedules(self, onOrder, onGiftOrder, doUpdateLater = True):
         if onOrder != None:
@@ -2506,21 +2536,11 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
                     nextTime = nextGiftTime
 
 
-            existingDuration = None
-            checkTaskList = taskMgr.getTasksNamed(taskName)
-            if checkTaskList:
-                currentTime = globalClock.getFrameTime()
-                checkTask = checkTaskList[0]
-                existingDuration = checkTask.wakeTime - currentTime
+            # The next delivery is for whatever comes first.
+            taskMgr.remove(taskName)
             if nextTime:
                 newDuration = max(10.0, nextTime * 60 - time.time())
-                if existingDuration and existingDuration >= newDuration:
-                    taskMgr.remove(taskName)
-                    taskMgr.doMethodLater(newDuration, self.__deliverBothPurchases, taskName)
-                elif existingDuration and existingDuration < newDuration:
-                    pass
-                else:
-                    taskMgr.doMethodLater(newDuration, self.__deliverBothPurchases, taskName)
+                taskMgr.doMethodLater(newDuration, self.__deliverBothPurchases, taskName)
         return
 
     def __deliverBothPurchases(self, task):
@@ -3015,6 +3035,16 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
     def doResistanceEffect(self, msgIndex):
         msgType, itemIndex = ResistanceChat.decodeId(msgIndex)
         msgValue = ResistanceChat.getItemValue(msgIndex)
+        if msgType == ResistanceChat.RESISTANCE_MINI_RESTOCK:
+            # A mini Gag-up: a couple of the track's smallest gags.
+            tracks = list(range(len(ToontownBattleGlobals.Tracks))) if msgValue == -1 else [msgValue]
+            for track in tracks:
+                for level in ResistanceChat.MiniRestockLevels:
+                    for i in range(ResistanceChat.MiniRestockAmount):
+                        self.inventory.addItems(track, level, 1)
+            self.d_setInventory(self.inventory.makeNetString())
+            return
+        msgType = ResistanceChat.MiniOf.get(msgType, msgType)
         if msgType == ResistanceChat.RESISTANCE_TOONUP:
             self.toonUp(msgValue)
             self.notify.debug('Toon-up for ' + self.name)
@@ -3845,7 +3875,7 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
             return 0
 
     def removeFlowerFromBasketAtIndex(self, index):
-        if self.flowerBasket.removeFlowerAtIndex(index):
+        if self.flowerBasket.removeFishAtIndex(index):
             self.d_setFlowerBasket(*self.flowerBasket.getNetLists())
             return 1
         else:
@@ -3936,6 +3966,69 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
     def setTrackBonusLevel(self, trackBonusLevelArray):
         self.trackBonusLevel = trackBonusLevelArray
 
+    # --- Swapping a gag track (offline; see TrackSwapPanel) ---
+
+    def setGagTracksLocked(self, locked):
+        self.gagTracksLocked = locked
+
+    def b_setGagTracksLocked(self, locked):
+        self.setGagTracksLocked(locked)
+        self.sendUpdate('setGagTracksLocked', [locked])
+
+    def getGagTracksLocked(self):
+        return getattr(self, 'gagTracksLocked', 0)
+
+    def requestTrackSwap(self, outTrack, inTrack):
+        """The toon gives up outTrack for inTrack, a track it does not have
+        but the quest line has offered. Throw and Squirt stay. Both tracks start from no experience
+        (and no gags): the one given up loses all it had, even if it was
+        maxed, and gets it back from nothing if it is ever taken again.
+        Never while a track is being trained, and never after ~maxToon."""
+        avId = self.air.getAvatarIdFromSender()
+        if avId != self.doId:
+            self.air.writeServerEvent('suspicious', avId, 'requestTrackSwap for %d' % self.doId)
+            return
+        result = self.trackSwapProblem(outTrack, inTrack)
+        if result == TrackSwapOK:
+            self.swapTracks(outTrack, inTrack)
+        self.sendUpdateToAvatarId(avId, 'trackSwapResult', [result])
+
+    def trackSwapProblem(self, outTrack, inTrack):
+        tracks = len(ToontownBattleGlobals.Tracks)
+        if self.getGagTracksLocked():
+            return TrackSwapLocked
+        if self.trackProgressId >= 0:
+            return TrackSwapNotYet
+        if not (0 <= outTrack < tracks and 0 <= inTrack < tracks) or outTrack == inTrack:
+            return TrackSwapBadTrack
+        if inTrack not in Quests.tracksOfferedTo(self):
+            # Only a track the quest line has put in front of the toon.
+            return TrackSwapBadTrack
+        if outTrack in (ToontownBattleGlobals.THROW_TRACK, ToontownBattleGlobals.SQUIRT_TRACK):
+            return TrackSwapBadTrack
+        if not self.hasTrackAccess(outTrack) or self.hasTrackAccess(inTrack):
+            return TrackSwapBadTrack
+        return TrackSwapOK
+
+    def swapTracks(self, outTrack, inTrack):
+        self.notify.info('toon %d swaps track %d for %d' % (self.doId, outTrack, inTrack))
+        trackArray = list(self.trackArray)
+        trackArray[outTrack] = 0
+        trackArray[inTrack] = 1
+        self.b_setTrackAccess(trackArray)
+        for track in (outTrack, inTrack):
+            self.experience.experience[track] = 0
+        self.b_setExperience(self.experience.makeNetString())
+        bonus = list(self.trackBonusLevel)
+        for track in (outTrack, inTrack):
+            bonus[track] = -1
+        self.b_setTrackBonusLevel(bonus)
+        for track in (outTrack, inTrack):
+            for level in range(len(self.inventory.inventory[track])):
+                self.inventory.inventory[track][level] = 0
+        self.inventory.calcTotalProps()
+        self.b_setInventory(self.inventory.makeNetString())
+
     def getTrackBonusLevel(self, track = None):
         if track == None:
             return self.trackBonusLevel
@@ -3971,29 +4064,22 @@ class DistributedToonAI(DistributedPlayerAI.DistributedPlayerAI, DistributedSmoo
         self.sendUpdate('useSpecialResponse', [response])
 
     def tryToUseSpecial(self, special):
-        estateOwnerDoId = simbase.air.estateMgr.zone2owner.get(self.zoneId)
+        # Garden items used from the Shtiker Book, such as the garden
+        # accelerator, work in the toon's own garden.
         response = 'badlocation'
-        doIHaveThisSpecial = False
-        for curSpecial in self.gardenSpecials:
-            if curSpecial[0] == special and curSpecial[1] > 0:
-                doIHaveThisSpecial = True
-                break
-
-        if not doIHaveThisSpecial:
+        if not any(index == special and count > 0 for index, count in self.gardenSpecials):
             return response
-        if not self.doId == estateOwnerDoId:
-            self.notify.warning("how did this happen, planting an item you don't own")
+        estate = getattr(self, 'estate', None)
+        if not estate or estate.zoneId != self.zoneId or self.doId not in estate.toons:
             return response
-        if estateOwnerDoId:
-            estate = simbase.air.estateMgr.estate.get(estateOwnerDoId)
-            if estate and hasattr(estate, 'avIdList'):
-                ownerIndex = estate.avIdList.index(estateOwnerDoId)
-                if ownerIndex >= 0:
-                    estate.doEpochNow(onlyForThisToonIndex=ownerIndex)
-                    self.removeGardenItem(special, 1)
-                    response = 'success'
-                    self.air.writeServerEvent('garden_fertilizer', avId=self.doId)
-        return response
+        ownerIndex = estate.toons.index(self.doId)
+        if ownerIndex not in estate.gardens:
+            return response
+        if special == GardenGlobals.GardenAcceleratorSpecial:
+            estate.doEpochNow(onlyForThisToonIndex=ownerIndex)
+        self.removeGardenItem(special, 1)
+        self.air.writeServerEvent('garden_fertilizer', avId=self.doId)
+        return 'success'
 
     def sendGardenEvent(self):
         if hasattr(self, 'estateZones') and hasattr(self, 'doId'):
@@ -4728,10 +4814,11 @@ def maxToon(hasConfirmed='UNCONFIRMED'):
     toon = spellbook.getInvoker()
 
     if hasConfirmed != 'CONFIRM':
-        return 'Are you sure you want to max out %s? This process is irreversible. Use "~maxToon CONFIRM" to confirm.' % toon.getName()
+        return 'Are you sure you want to max out %s? This process is irreversible. Press MaxToon in SpeedChat Tools again, or use "~maxToon CONFIRM", to confirm.' % toon.getName()
 
-    # Max out gag tracks (all 7 tracks)
+    # Max out gag tracks (all 7 tracks); no track swapping after this.
     toon.b_setTrackAccess([1] * 7)
+    toon.b_setGagTracksLocked(1)
     toon.b_setMaxCarry(MaxCarryLimit + 15) # Compensate for the extra gag track.
     toon.experience.maxOutExp() # Completely max out the toons experience.
     toon.b_setExperience(toon.experience.makeNetString())
@@ -5030,10 +5117,6 @@ def dna(part, value):
     def isValidColor(colorIndex):
         if not 0 <= colorIndex <= 38: # This could actually be selected from ToonDNA, but I prefer this :D
             return False
-        if colorIndex == 0 and dna.getAnimal() != 'bear':
-            return False
-        if colorIndex == 38 and dna.getAnimal() != 'cat':
-            return False
         return True
 
     # Body Part Colors
@@ -5120,10 +5203,6 @@ def dna(part, value):
         species = ['dog', 'cat', 'horse', 'mouse', 'rabbit', 'duck', 'monkey', 'bear', 'pig', 'crocodile', 'deer']
         if value not in species:
             return "DNA: Invalid head type specified."
-        if dna.headColor == 0x1a and value != 'cat':
-            return "DNA: Cannot have a black toon (non-cat)!"
-        if dna.headColor == 0 and value != 'bear':
-            return "DNA: Cannot have a white toon (non-bear)!"
         species = dict(map(None, species, ToonDNA.toonSpeciesTypes))
         headSize = dna.head[1:3]
         dna.head = (species.get(value) + headSize)
